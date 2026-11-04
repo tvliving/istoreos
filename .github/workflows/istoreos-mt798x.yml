@@ -241,7 +241,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            python3-setuptools rsync unzip zlib1g-dev file wget ccache zstd
+            libelf-dev python3-dev python3-setuptools rsync unzip zlib1g-dev \
+            file wget ccache zstd swig time xsltproc subversion bc patch bzip2 \
+            libtool-bin pkg-config autoconf automake
+          # 少数 perl 模块在精简镜像里可能缺，装不上也不阻塞（prereq 会明确报）
+          sudo apt-get install -y -qq perl libthread-queue-any-perl 2>/dev/null || true
 
       - name: 下载清单
         uses: actions/download-artifact@v4
@@ -291,74 +295,86 @@ jobs:
           DEVICE_FILE: plan/${{ matrix.file }}
           PACKAGES: ${{ inputs.packages || 'luci luci-compat luci-i18n-base-zh-cn luci-app-store' }}
         run: |
-          # 1) 先只选 target/subtarget，让 kconfig 自己生成该 subtarget 的机型符号表
-          cat > .config <<'EOF'
-          CONFIG_TARGET_mediatek=y
-          CONFIG_TARGET_mediatek_filogic=y
-          CONFIG_DEVEL=y
-          CONFIG_CCACHE=y
-          EOF
-          make defconfig >/dev/null 2>&1
+          # ---------- 1. 先跑 defconfig 的前置：prepare-tmpinfo ----------
+          # 这一步会先做主机环境检查（prereq-build），失败原因必须打出来，不能吞
+          mkdir -p tmp
+          echo "::group::prepare-tmpinfo"
+          if ! make -j1 prepare-tmpinfo 2>&1 | tee prepare.log; then
+            echo "::endgroup::"
+            echo "::error::主机环境不满足编译要求，看上面 'Please install' / 'failed' / 'Build dependency' 行"
+            exit 1
+          fi
+          echo "::endgroup::"
 
-          # 2) 用生成的符号表反查机型 -> 符号，避免手写符号名写错被静默丢弃
+          # ---------- 2. 从权威 Kconfig 元数据取机型符号 ----------
+          if [ ! -s tmp/.config-target.in ]; then
+            echo "::error::tmp/.config-target.in 没有生成（元数据阶段就失败了）"
+            exit 1
+          fi
+          n_sym=$(grep -c "^menuconfig TARGET_DEVICE_mediatek_filogic_DEVICE_" tmp/.config-target.in || true)
+          echo "Kconfig 元数据中 filogic 机型符号: ${n_sym:-0} 个"
+          if [ "${n_sym:-0}" -eq 0 ]; then
+            echo "::error::元数据里没有 filogic 机型符号"
+            grep -n "mediatek" tmp/.config-target.in | head -20 || head -30 tmp/.config-target.in
+            exit 1
+          fi
+
           python3 - <<'PY'
           import os, re, sys
+
           want = [l.strip() for l in open(os.environ["DEVICE_FILE"])
                   if l.strip() and not l.startswith("#")]
-          txt = open(".config").read()
           norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
 
-          syms = {}
-          for m in re.finditer(
-              r"^(?:# )?(CONFIG_TARGET_DEVICE_[A-Za-z0-9_]+_DEVICE_(\S+?))(?: is not set|=y)$",
-              txt, re.M):
-              syms[norm(m.group(2))] = m.group(1)
-          print("kconfig 中可用机型符号: %d 个" % len(syms))
+          txt = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
+          devs = re.findall(r"^menuconfig\s+TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)\s*$", txt, re.M)
+          syms = {norm(d): "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" + d for d in devs}
+          print("元数据机型符号: %d 个" % len(syms))
 
           picked, missing = [], []
           for d in want:
               s = syms.get(norm(d))
               (picked.append(s) if s else missing.append(d))
           if missing:
-              print("::error::这些机型在 kconfig 里找不到对应符号（源码树可能变了）: %s"
-                    % " ".join(missing))
+              print("::error::源码树中不存在这些机型（可能已被上游改名/删除）: %s" % " ".join(missing))
               sys.exit(1)
 
-          keep = set(picked)
-          out = []
-          for line in txt.splitlines():
-              if re.match(r"^(?:# )?CONFIG_TARGET_DEVICE_.*_DEVICE_\S+(?: is not set|=y)$", line):
-                  sym = line.split("=")[0].replace("# ", "").replace(" is not set", "")
-                  if sym not in keep:
-                      continue
-              out.append(line)
-          out += ["%s=y" % s for s in picked]
-
           pkgs = [p for p in os.environ.get("PACKAGES", "").split() if p]
-          out += ["CONFIG_PACKAGE_%s=y" % p for p in pkgs]
-          open(".config", "w").write("\n".join(out) + "\n")
+          lines = ["CONFIG_TARGET_mediatek=y",
+                   "CONFIG_TARGET_mediatek_filogic=y",
+                   "CONFIG_DEVEL=y",
+                   "CONFIG_CCACHE=y"]
+          lines += ["%s=y" % s for s in picked]
+          lines += ["CONFIG_PACKAGE_%s=y" % p for p in pkgs]
+          open(".config", "w").write("\n".join(lines) + "\n")
           open("wanted.txt", "w").write("\n".join(want) + "\n")
           print("已写入 %d 台机型 + %d 个额外包" % (len(picked), len(pkgs)))
           PY
 
-          make defconfig >/dev/null 2>&1
+          # ---------- 3. defconfig（日志保留，失败要能看见） ----------
+          echo "::group::make defconfig"
+          if ! make -j1 defconfig 2>&1 | tee defconfig.log; then
+            echo "::endgroup::"
+            echo "::error::make defconfig 失败"
+            exit 1
+          fi
+          echo "::endgroup::"
 
-          # 3) 复核：预期台数 vs 实际选中台数，差集必须为空
+          # ---------- 4. 复核：预期台数 vs 实际选中台数 ----------
           python3 - <<'PY'
-          import os, re, subprocess, sys
+          import re, sys
           want = [l.strip() for l in open("wanted.txt") if l.strip()]
-          cfg = open(".config").read()
-          got = set()
-          for m in re.finditer(r"^CONFIG_TARGET_DEVICE_[A-Za-z0-9_]+_DEVICE_(\S+)=y$", cfg, re.M):
-              got.add(re.sub(r"[^a-z0-9]", "_", m.group(1).lower()))
-          wset = {re.sub(r"[^a-z0-9]", "_", w.lower()): w for w in want}
+          cfg = open(".config", encoding="utf-8", errors="replace").read()
+          norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
+          got = {norm(m) for m in
+                 re.findall(r"^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)=y$", cfg, re.M)}
+          wset = {norm(w): w for w in want}
           lost = [w for k, w in wset.items() if k not in got]
-          print("预期 %d 台，实际选中 %d 台" % (len(wset), len(got & set(wset))))
+          print("预期 %d 台，.config 实际选中 %d 台" % (len(wset), len(got & set(wset))))
           if lost:
-              print("::error::被静默丢弃的机型: %s" % " ".join(lost))
+              print("::error::被 kconfig 丢弃的机型: %s" % " ".join(lost))
               sys.exit(1)
-          # 关键包是否真的进去
-          for p in ("luci", "istoreos-files"):
+          for p in ("luci", "luci-app-store", "istoreos-files"):
               flag = "CONFIG_PACKAGE_%s=y" % p
               print(("OK   " if flag in cfg else "WARN ") + flag)
           PY
@@ -377,18 +393,25 @@ jobs:
       - name: 失败诊断
         if: failure()
         run: |
-          echo "===== 错误摘要 ====="
-          grep -nE "^make(\[[0-9]+\])?: \*\*\*|Error [0-9]+$|error:" build.log | tail -40 || true
-          echo "===== 日志尾部 ====="
-          tail -80 build.log || true
+          for f in prepare.log defconfig.log feeds-update.log feeds-install.log build.log; do
+            if [ -f "$f" ]; then
+              echo "===== $f （尾部 40 行） ====="
+              tail -40 "$f" || true
+            fi
+          done
+          echo "===== .config 前 15 行 ====="
+          head -15 .config 2>/dev/null || true
 
       - name: 上传编译日志（失败时用于排查）
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.group }}
-          path: build.log
+          path: |
+            *.log
+            .config
           retention-days: 7
+          if-no-files-found: warn
 
       - name: 校验每台机型的产物
         run: |
