@@ -290,7 +290,7 @@ jobs:
             exit 1
           fi
 
-      - name: 生成 .config（自动规避 feeds 的 Kconfig 递归依赖）
+      - name: 生成 .config（多机型 + 自动规避 feeds 的 Kconfig 递归依赖）
         env:
           DEVICE_FILE: plan/${{ matrix.file }}
           PACKAGES: ${{ inputs.packages || 'luci luci-compat luci-i18n-base-zh-cn luci-app-store' }}
@@ -299,16 +299,33 @@ jobs:
           # 辅助脚本先落盘，避免在 for 循环里嵌套 heredoc
           cat > gen_config.py <<'PY'
           import os, re, sys
+
           want = [l.strip() for l in open(os.environ["DEVICE_FILE"])
                   if l.strip() and not l.startswith("#")]
           norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
-          txt = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
-          devs = re.findall(r"^menuconfig\s+TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)\s*$", txt, re.M)
-          syms = {norm(d): "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" + d for d in devs}
-          print("元数据机型符号: %d 个" % len(syms))
+
+          meta = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
+
+          # 机型符号在元数据里是：menuconfig TARGET_DEVICE_<boardconf>_DEVICE_<dev>
+          raw = re.findall(r"^\s*menuconfig\s+(TARGET_DEVICE_mediatek_filogic_DEVICE_\S+)\s*$",
+                           meta, re.M)
+          pref = "TARGET_DEVICE_mediatek_filogic_DEVICE_"
+          syms = {}
+          for s in raw:
+              syms[norm(s[len(pref):])] = "CONFIG_" + s
+          print("元数据 filogic 机型符号: %d 行 -> %d 个唯一机型" % (len(raw), len(syms)))
           if not syms:
-              print("::error::元数据里没有 filogic 机型符号")
+              print("::error::元数据里没有 filogic 机型符号（tmp/.config-target.in 不完整）")
               sys.exit(1)
+
+          # 关键：所有 TARGET_DEVICE_* 都位于 menu "Target Devices" 内，
+          # 而该菜单写着 depends on TARGET_MULTI_PROFILE。不显式打开它时，
+          # kconfig 认为这些符号不可见，--defconfig 会把它们全部丢弃 -> 选中 0 台。
+          multi = "TARGET_MULTI_PROFILE" in meta
+          print("元数据含 Target Devices 菜单（需 MULTI_PROFILE）: %s" % multi)
+          if not multi:
+              print("::warning::元数据里没有 TARGET_MULTI_PROFILE，按老版 kconfig 结构继续")
+
           picked, missing = [], []
           for d in want:
               s = syms.get(norm(d))
@@ -316,20 +333,27 @@ jobs:
           if missing:
               print("::error::源码树中不存在这些机型: %s" % " ".join(missing))
               sys.exit(1)
+
           pkgs = [p for p in os.environ.get("PACKAGES", "").split() if p]
           lines = ["CONFIG_TARGET_mediatek=y",
                    "CONFIG_TARGET_mediatek_filogic=y",
                    "CONFIG_DEVEL=y",
                    "CONFIG_CCACHE=y"]
+          if multi:
+              lines += ["CONFIG_TARGET_MULTI_PROFILE=y",
+                        "# CONFIG_TARGET_ALL_PROFILES is not set",
+                        "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"]
           lines += ["%s=y" % s for s in picked]
           lines += ["CONFIG_PACKAGE_%s=y" % p for p in pkgs]
           open(".config", "w").write("\n".join(lines) + "\n")
           open("wanted.txt", "w").write("\n".join(want) + "\n")
-          print("已写入 %d 台机型 + %d 个额外包" % (len(picked), len(pkgs)))
+          print("已写入 %d 台机型 + %d 个额外包%s"
+                % (len(picked), len(pkgs), "（多机型模式）" if multi else ""))
           PY
 
           cat > verify_config.py <<'PY'
           import re, sys
+
           want = [l.strip() for l in open("wanted.txt") if l.strip()]
           cfg = open(".config", encoding="utf-8", errors="replace").read()
           norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
@@ -339,11 +363,16 @@ jobs:
           lost = [w for k, w in wset.items() if k not in got]
           print("预期 %d 台，.config 实际选中 %d 台" % (len(wset), len(got & set(wset))))
           if lost:
-              print("::warning::被 kconfig 丢弃的机型: %s" % " ".join(lost))
+              head = " ".join(lost[:15]) + (" ..." if len(lost) > 15 else "")
+              print("::warning::被 kconfig 丢弃 %d 台: %s" % (len(lost), head))
+              mp = [l.strip() for l in cfg.splitlines() if "MULTI_PROFILE" in l]
+              print("MULTI_PROFILE 状态: %s" % (mp or "（.config 里没有该符号）"))
               sys.exit(1)
           for p in ("luci", "luci-app-store", "istoreos-files"):
               flag = "CONFIG_PACKAGE_%s=y" % p
               print(("OK   " if flag in cfg else "WARN ") + flag)
+          mp = [l.strip() for l in cfg.splitlines() if "MULTI_PROFILE" in l]
+          print("多机型模式: %s" % (mp or "（未启用）"))
           PY
 
           mkdir -p tmp
@@ -360,10 +389,10 @@ jobs:
             fi
             grep -E "Please install|Build dependency|Failed to build" prepare.log | head -10 || true
 
-            # 2) 用权威元数据生成 .config
+            # 2) 用权威元数据生成 .config 种子
             python3 gen_config.py
 
-            # 3) defconfig —— kconfig 遇递归依赖时仍会写出 .config 并 exit 0，只能双判
+            # 3) defconfig —— kconfig 遇递归依赖时仍会写出 .config 并 exit 0，只能事后复核
             if ! make -j1 defconfig > defconfig.log 2>&1; then
               tail -40 defconfig.log
               echo "::endgroup::"
@@ -381,7 +410,7 @@ jobs:
               break
             fi
 
-            # 5) 失败：若是 feed 的 Kconfig 递归依赖，禁用问题包后重试
+            # 5) feed 的 Kconfig 递归依赖：禁用问题包后重试
             if grep -q "recursive dependency detected" defconfig.log; then
               echo "::warning::检测到 Kconfig 递归依赖（feed 元数据 bug），禁用问题包后重试"
               grep -A2 "recursive dependency detected" defconfig.log | head -8 || true
@@ -413,8 +442,18 @@ jobs:
               exit 1
             fi
 
+            # 6) 其它原因：一次性打印全部诊断信息
+            echo "::error::.config 校验未通过，且 defconfig 没有递归依赖报错"
+            echo "===== .config 前 25 行 ====="
+            head -25 .config || true
+            echo "===== MULTI_PROFILE / ALL_PROFILES ====="
+            grep -n "MULTI_PROFILE\|TARGET_ALL_PROFILES" .config || echo "（无）"
+            echo "===== 元数据里的 Target Devices 菜单 ====="
+            grep -n -A3 'menu "Target Devices"' tmp/.config-target.in | head -8 \
+              || echo "（元数据里没有该菜单）"
+            echo "===== defconfig.log 尾部 ====="
+            tail -30 defconfig.log || true
             echo "::endgroup::"
-            echo "::error::.config 校验未通过，且原因不是递归依赖，见上方日志"
             exit 1
           done
 
@@ -422,7 +461,6 @@ jobs:
             echo "::error::尝试 3 次仍未得到有效 .config"
             exit 1
           fi
-
       - name: 预下载软件包
         run: |
           make download -j8 || echo "::warning::make download 有失败项，构建时会重试"
