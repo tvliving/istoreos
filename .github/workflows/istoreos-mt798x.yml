@@ -290,55 +290,32 @@ jobs:
             exit 1
           fi
 
-      - name: 生成 .config 并逐台校验选中状态
+      - name: 生成 .config（自动规避 feeds 的 Kconfig 递归依赖）
         env:
           DEVICE_FILE: plan/${{ matrix.file }}
           PACKAGES: ${{ inputs.packages || 'luci luci-compat luci-i18n-base-zh-cn luci-app-store' }}
+          PROTECTED: luci luci-base luci-compat luci-app-store istoreos-files base-files
         run: |
-          # ---------- 1. 先跑 defconfig 的前置：prepare-tmpinfo ----------
-          # 这一步会先做主机环境检查（prereq-build），失败原因必须打出来，不能吞
-          mkdir -p tmp
-          echo "::group::prepare-tmpinfo"
-          if ! make -j1 prepare-tmpinfo 2>&1 | tee prepare.log; then
-            echo "::endgroup::"
-            echo "::error::主机环境不满足编译要求，看上面 'Please install' / 'failed' / 'Build dependency' 行"
-            exit 1
-          fi
-          echo "::endgroup::"
-
-          # ---------- 2. 从权威 Kconfig 元数据取机型符号 ----------
-          if [ ! -s tmp/.config-target.in ]; then
-            echo "::error::tmp/.config-target.in 没有生成（元数据阶段就失败了）"
-            exit 1
-          fi
-          n_sym=$(grep -c "^menuconfig TARGET_DEVICE_mediatek_filogic_DEVICE_" tmp/.config-target.in || true)
-          echo "Kconfig 元数据中 filogic 机型符号: ${n_sym:-0} 个"
-          if [ "${n_sym:-0}" -eq 0 ]; then
-            echo "::error::元数据里没有 filogic 机型符号"
-            grep -n "mediatek" tmp/.config-target.in | head -20 || head -30 tmp/.config-target.in
-            exit 1
-          fi
-
-          python3 - <<'PY'
+          # 辅助脚本先落盘，避免在 for 循环里嵌套 heredoc
+          cat > gen_config.py <<'PY'
           import os, re, sys
-
           want = [l.strip() for l in open(os.environ["DEVICE_FILE"])
                   if l.strip() and not l.startswith("#")]
           norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
-
           txt = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
           devs = re.findall(r"^menuconfig\s+TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)\s*$", txt, re.M)
           syms = {norm(d): "CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_" + d for d in devs}
           print("元数据机型符号: %d 个" % len(syms))
-
+          if not syms:
+              print("::error::元数据里没有 filogic 机型符号")
+              sys.exit(1)
           picked, missing = [], []
           for d in want:
               s = syms.get(norm(d))
               (picked.append(s) if s else missing.append(d))
           if missing:
-              print("::error::源码树中不存在这些机型（可能已被上游改名/删除）: %s" % " ".join(missing))
+              print("::error::源码树中不存在这些机型: %s" % " ".join(missing))
               sys.exit(1)
-
           pkgs = [p for p in os.environ.get("PACKAGES", "").split() if p]
           lines = ["CONFIG_TARGET_mediatek=y",
                    "CONFIG_TARGET_mediatek_filogic=y",
@@ -351,17 +328,7 @@ jobs:
           print("已写入 %d 台机型 + %d 个额外包" % (len(picked), len(pkgs)))
           PY
 
-          # ---------- 3. defconfig（日志保留，失败要能看见） ----------
-          echo "::group::make defconfig"
-          if ! make -j1 defconfig 2>&1 | tee defconfig.log; then
-            echo "::endgroup::"
-            echo "::error::make defconfig 失败"
-            exit 1
-          fi
-          echo "::endgroup::"
-
-          # ---------- 4. 复核：预期台数 vs 实际选中台数 ----------
-          python3 - <<'PY'
+          cat > verify_config.py <<'PY'
           import re, sys
           want = [l.strip() for l in open("wanted.txt") if l.strip()]
           cfg = open(".config", encoding="utf-8", errors="replace").read()
@@ -372,12 +339,89 @@ jobs:
           lost = [w for k, w in wset.items() if k not in got]
           print("预期 %d 台，.config 实际选中 %d 台" % (len(wset), len(got & set(wset))))
           if lost:
-              print("::error::被 kconfig 丢弃的机型: %s" % " ".join(lost))
+              print("::warning::被 kconfig 丢弃的机型: %s" % " ".join(lost))
               sys.exit(1)
           for p in ("luci", "luci-app-store", "istoreos-files"):
               flag = "CONFIG_PACKAGE_%s=y" % p
               print(("OK   " if flag in cfg else "WARN ") + flag)
           PY
+
+          mkdir -p tmp
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::group::第 ${attempt} 次生成 .config"
+
+            # 1) defconfig 前置：主机检查 + 元数据扫描
+            if ! make -j1 prepare-tmpinfo > prepare.log 2>&1; then
+              tail -40 prepare.log
+              echo "::endgroup::"
+              echo "::error::prepare-tmpinfo 失败（主机依赖缺失或 package 元数据有错），见上方日志"
+              exit 1
+            fi
+            grep -E "Please install|Build dependency|Failed to build" prepare.log | head -10 || true
+
+            # 2) 用权威元数据生成 .config
+            python3 gen_config.py
+
+            # 3) defconfig —— kconfig 遇递归依赖时仍会写出 .config 并 exit 0，只能双判
+            if ! make -j1 defconfig > defconfig.log 2>&1; then
+              tail -40 defconfig.log
+              echo "::endgroup::"
+              echo "::error::make defconfig 执行失败"
+              exit 1
+            fi
+
+            # 4) 复核台数
+            vrc=0
+            python3 verify_config.py || vrc=$?
+
+            if [ "$vrc" = "0" ]; then
+              ok=1
+              echo "::endgroup::"
+              break
+            fi
+
+            # 5) 失败：若是 feed 的 Kconfig 递归依赖，禁用问题包后重试
+            if grep -q "recursive dependency detected" defconfig.log; then
+              echo "::warning::检测到 Kconfig 递归依赖（feed 元数据 bug），禁用问题包后重试"
+              grep -A2 "recursive dependency detected" defconfig.log | head -8 || true
+              bad=$(grep -oE "symbol PACKAGE_[A-Za-z0-9_.+-]+ depends on PACKAGE_" defconfig.log \
+                    | sed -E 's/^symbol PACKAGE_([^ ]+) .*/\1/' | sort -u)
+              echo "问题包: ${bad:-（未解析出包名）}"
+              changed=0
+              for p in $bad; do
+                if echo " $PROTECTED " | grep -q " $p "; then
+                  echo "::error::$p 属于必需包，不能自动禁用，请手工修 feed"
+                  echo "::endgroup::"
+                  exit 1
+                fi
+                while IFS= read -r d; do
+                  [ -z "$d" ] && continue
+                  if [ -f "$d/Makefile" ]; then
+                    mv "$d/Makefile" "$d/Makefile.disabled"
+                    echo "已禁用: $d"
+                    changed=1
+                  fi
+                done < <(find feeds package/feeds -maxdepth 3 -type d -name "$p" 2>/dev/null || true)
+              done
+              echo "::endgroup::"
+              if [ "$changed" = "1" ]; then
+                rm -f tmp/.packageinfo tmp/.config-package.in
+                continue
+              fi
+              echo "::error::检测到递归依赖但没定位到包目录，见 defconfig.log"
+              exit 1
+            fi
+
+            echo "::endgroup::"
+            echo "::error::.config 校验未通过，且原因不是递归依赖，见上方日志"
+            exit 1
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "::error::尝试 3 次仍未得到有效 .config"
+            exit 1
+          fi
 
       - name: 预下载软件包
         run: |
