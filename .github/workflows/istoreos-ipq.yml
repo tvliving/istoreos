@@ -246,7 +246,7 @@ jobs:
 
           t = os.environ["TARGET"]
 
-          # matrix.subs / matrix.files 是 JSON 数组经 ${{ }} 渲染成的字符串，
+          # matrix.subs / matrix.files 是 JSON 数组经 GitHub 表达式渲染成的字符串，
           # 多元素时中间元素的引号/空格不能靠 strip 清掉，必须 json.loads；
           # 解析失败再按逗号切分并逐元素去引号兜底。
           def parse_list(raw):
