@@ -299,7 +299,7 @@ jobs:
           PY
 
           cat > verify_config.py <<'PY'
-          import re, sys, json
+          import os, re, sys, json
 
           t = os.environ["TARGET"]
           wanted = json.load(open("wanted.json"))
