@@ -102,7 +102,8 @@ jobs:
           matrix, rows = [], []
           total = 0
           for g in groups:
-              # 一个组 = 一个编译 job；组内可含多个 subtarget（各自独立内核）
+              # OpenWrt 一次编译只能选一个 subtarget（TARGET_<t>_<sub> 是 choice，
+              # 写两个会互相覆盖），所以每个 subtarget 独立一个编译 job
               subs = []
               for t, s, mk in GROUPS_DEF[g]:
                   if not os.path.exists(mk):
@@ -123,16 +124,22 @@ jobs:
                       f.write("\n".join(devs) + "\n")
                   subs.append({"target": t, "sub": s, "file": fname, "count": len(devs)})
                   print("%s/%s: %d 台" % (t, s, len(devs)))
-              cnt = sum(s["count"] for s in subs)
-              total += cnt
-              matrix.append({
-                  "group": g,
-                  "target": subs[0]["target"],
-                  "subs": json.dumps([s["sub"] for s in subs]),
-                  "files": json.dumps([s["file"] for s in subs]),
-                  "count": cnt,
-              })
-              rows.append((g, cnt, [s["sub"] for s in subs]))
+              total += sum(s["count"] for s in subs)
+              # 组内只有 1 个 subtarget 时沿用原组名；多个时按 subtarget 拆分命名
+              if len(subs) == 1:
+                  entries = [(g, subs)]
+              else:
+                  entries = [("%s-%s" % (g, s["sub"]), [s]) for s in subs]
+              for gname, ss in entries:
+                  cnt = sum(s["count"] for s in ss)
+                  matrix.append({
+                      "group": gname,
+                      "target": ss[0]["target"],
+                      "subs": json.dumps([s["sub"] for s in ss]),
+                      "files": json.dumps([s["file"] for s in ss]),
+                      "count": cnt,
+                  })
+                  rows.append((gname, cnt, [s["sub"] for s in ss]))
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write("matrix=%s\n" % json.dumps(matrix, separators=(",", ":")))
@@ -153,7 +160,7 @@ jobs:
           retention-days: 3
 
   # ============================================================
-  # Job 2：按芯片组编译（每组一次内核编译，产出该组全部机型）
+  # Job 2：按芯片组编译（每个 subtarget 一次内核编译，产出其全部机型）
   # ============================================================
   build:
     name: 🏗️ ${{ matrix.group }} (${{ matrix.count }} 台)
