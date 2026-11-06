@@ -1,4 +1,4 @@
-name: 🍍 iStoreOS IPQ Build (50xx/60xx/807x/95xx/40xx/806x)
+name: 🍍 iStoreOS IPQ Build (50xx/60xx/807x/95xx/806x)
 
 # 每周四 08:00 (北京时间) 自动编译 = UTC 周四 00:00
 on:
@@ -18,7 +18,6 @@ on:
           - 'IPQ60XX'
           - 'IPQ50XX'
           - 'IPQ95XX'
-          - 'IPQ40XX'
           - 'IPQ806X'
       packages:
         description: '2、额外固件包（空格分隔，默认已含 luci + iStore）'
@@ -54,7 +53,6 @@ jobs:
           sparse-checkout: |
             target/linux/qualcommax/image
             target/linux/qualcommbe/image
-            target/linux/ipq40xx/image
             target/linux/ipq806x/image
           sparse-checkout-cone-mode: false
 
@@ -73,9 +71,7 @@ jobs:
               "IPQ60XX": [("qualcommax", "ipq60xx", "target/linux/qualcommax/image/ipq60xx.mk")],
               "IPQ50XX": [("qualcommax", "ipq50xx", "target/linux/qualcommax/image/ipq50xx.mk")],
               "IPQ95XX": [("qualcommbe", "ipq95xx", "target/linux/qualcommbe/image/ipq95xx.mk")],
-              "IPQ40XX": [("ipq40xx", "generic",  "target/linux/ipq40xx/image/generic.mk"),
-                          ("ipq40xx", "mikrotik", "target/linux/ipq40xx/image/mikrotik.mk"),
-                          ("ipq40xx", "chromium", "target/linux/ipq40xx/image/chromium.mk")],
+              # IPQ40XX 整组已移除（用户要求：不编 ipq40xx 任何机型）
               "IPQ806X": [("ipq806x", "generic",  "target/linux/ipq806x/image/generic.mk"),
                           ("ipq806x", "chromium", "target/linux/ipq806x/image/chromium.mk")],
           }
@@ -88,7 +84,7 @@ jobs:
           groups = ALIASES.get(want_sel, [want_sel])
           unknown = [g for g in groups if g not in GROUPS_DEF]
           if unknown:
-              print("::error::未知芯片组: %s" % " ".join(unknown))
+              print("::error::未知芯片组: %s（可选: %s）" % (" ".join(unknown), " ".join(sorted(GROUPS_DEF))))
               raise SystemExit(1)
 
           def devices_from_mk(path):
@@ -110,7 +106,13 @@ jobs:
               subs = []
               for t, s, mk in GROUPS_DEF[g]:
                   if not os.path.exists(mk):
-                      print("::error::找不到 %s" % mk)
+                      print("::error::找不到 %s —— 检查 sparse-checkout 是否漏了该目录，或当前 commit 里源码树是否完整" % mk)
+                      for root in ("target/linux", "target"):
+                          if os.path.isdir(root):
+                              print("已检出的 %s: %s" % (root, sorted(os.listdir(root))))
+                              break
+                      else:
+                          print("仓库根目录内容: %s" % sorted(os.listdir(".")))
                       raise SystemExit(1)
                   devs = sorted(set(devices_from_mk(mk)))
                   if not devs:

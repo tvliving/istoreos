@@ -1,0 +1,15 @@
+
+define Package/base-files/postinst
+#!/bin/sh
+
+HOST_SED="$(subst ${STAGING_DIR_HOST},$${STAGING_DIR_HOST},$(SED))"
+HOST_LN="$(subst ${STAGING_DIR_HOST},$${STAGING_DIR_HOST},$(LN))"
+
+[ -n "$${IPKG_INSTROOT}" ] && {
+	$${HOST_SED} '/targets\/amlogic\/meson/d' \
+		"$${IPKG_INSTROOT}/etc/opkg/distfeeds.conf" \
+		"$${IPKG_INSTROOT}/etc/apk/repositories.d/distfeeds.list"
+}
+true
+
+endef

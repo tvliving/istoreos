@@ -1,0 +1,59 @@
+From 09719dae7e47237176f6c1efeab3cb6e066b6f91 Mon Sep 17 00:00:00 2001
+From: AnYun <amadeus@jmu.edu.cn>
+Date: Mon, 3 Apr 2023 23:26:04 +0800
+Subject: [PATCH] net: phy: realtek: add LED configuration from OF for 8211f
+
+---
+ drivers/net/phy/realtek/realtek_main.c | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+--- a/drivers/net/phy/realtek/realtek_main.c
++++ b/drivers/net/phy/realtek/realtek_main.c
+@@ -101,6 +101,10 @@
+ #define RTL8211FVD_CLKOUT_REG			0x11
+ #define RTL8211FVD_CLKOUT_EN			BIT(8)
+ 
++#define RTL8211F_EEELEDCR                          0x11
++
++#define RTL8211FS_FLCR				0x12
++
+ /* RTL8211F RGMII configuration */
+ #define RTL8211F_RGMII_PAGE			0xd08
+ 
+@@ -744,9 +748,23 @@ static int rtl8211f_config_phy_eee(struc
+ 				RTL8211F_PHYCR2_PHY_EEE_ENABLE, 0);
+ }
+ 
++static void rtl8211f_set_led_data(struct phy_device *phydev, u16 val)
++{
++	int oldpage;
++	/*switch to extension page 0xd04*/
++	oldpage = phy_select_page(phydev, RTL8211F_LEDCR_PAGE);
++
++	if (oldpage >= 0) {
++		__phy_write(phydev, RTL8211F_LEDCR, val);
++		__phy_write(phydev, RTL8211F_EEELEDCR, 0x0);
++	}
++	phy_restore_page(phydev, oldpage, 0);
++}
++
+ static int rtl8211f_config_init(struct phy_device *phydev)
+ {
+ 	struct device *dev = &phydev->mdio.dev;
++	u32 led_data;
+ 	int ret;
+ 
+ 	if (((struct rtl821x_priv *)phydev->priv)->supports_fiber)
+@@ -761,6 +779,12 @@ static int rtl8211f_config_init(struct p
+ 		return ret;
+ 	}
+ 
++	if (!of_property_read_u32(dev->of_node, "realtek,led-data", &led_data))
++		rtl8211f_set_led_data(phydev, led_data);
++
++	if (!of_property_read_u32(dev->of_node, "realtek,flcr-data", &led_data))
++		phy_write_paged(phydev, RTL8211F_LEDCR_PAGE, RTL8211FS_FLCR, led_data);
++
+ 	ret = rtl8211f_config_rgmii_delay(phydev);
+ 	if (ret)
+ 		return ret;
