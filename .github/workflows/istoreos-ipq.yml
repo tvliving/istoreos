@@ -245,8 +245,23 @@ jobs:
           import os, re, sys, json
 
           t = os.environ["TARGET"]
-          subs = [s for s in os.environ["SUBS"].strip('[]", ').split(",") if s]
-          files = [f for f in os.environ["FILES"].strip('[]", ').split(",") if f]
+
+          # matrix.subs / matrix.files 是 JSON 数组经 ${{ }} 渲染成的字符串，
+          # 多元素时中间元素的引号/空格不能靠 strip 清掉，必须 json.loads；
+          # 解析失败再按逗号切分并逐元素去引号兜底。
+          def parse_list(raw):
+              raw = raw.strip()
+              try:
+                  v = json.loads(raw)
+                  if isinstance(v, list):
+                      return [str(x).strip() for x in v if str(x).strip()]
+              except Exception:
+                  pass
+              return [p.strip().strip("\"'") for p in raw.split(",")
+                      if p.strip().strip("\"'")]
+
+          subs = parse_list(os.environ["SUBS"])
+          files = parse_list(os.environ["FILES"])
           if len(subs) != len(files):
               print("::error::SUBS 与 FILES 数量不一致: %s / %s" % (subs, files))
               sys.exit(1)
