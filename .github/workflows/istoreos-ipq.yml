@@ -181,10 +181,26 @@ jobs:
 
       - name: 释放磁盘空间
         run: |
+          echo "===== 释放前 ====="
+          df -h / | tail -1
+          # 大型预装组件：dotnet/android/ghc/CodeQL/boost/node/jvm
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
-                      /usr/local/lib/node_modules /usr/lib/jvm 2>/dev/null || true
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /usr/local/.ghcup /var/lib/snapd 2>/dev/null || true
+          # Docker 镜像与容器层（编译用不到，可释放 6-10GB）
+          sudo systemctl stop docker docker.socket 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          # apt 缓存与用户缓存
           sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /home/runner/.cache \
+                      /home/runner/.npm /home/runner/.dotnet 2>/dev/null || true
+          # 系统日志与崩溃转储
+          sudo journalctl --vacuum-size=50M 2>/dev/null || true
+          sudo rm -rf /var/lib/systemd/coredump 2>/dev/null || true
+          echo "===== 释放后 ====="
           df -h / | tail -1
 
       - name: 安装编译依赖
