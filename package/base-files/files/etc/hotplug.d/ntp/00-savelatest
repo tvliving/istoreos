@@ -1,3 +1,0 @@
-[ "$ACTION" = "stratum" ] || exit 0
-
-touch /var/state/ntp_last_sync

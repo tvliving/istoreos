@@ -1,8 +1,0 @@
-/dts-v1/;
-
-#include "rk3568-hnas.dts"
-
-/ {
-	model = "EasePi ARS4";
-	compatible = "easepi,ars4", "rockchip,rk3568";
-};

@@ -1,4 +1,0 @@
-#!/bin/sh
-# mute default network configuration, we will scan network interfaces after kmods loaded
-
-exit 0
