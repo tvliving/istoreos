@@ -72,8 +72,10 @@ jobs:
               "IPQ50XX": [("qualcommax", "ipq50xx", "target/linux/qualcommax/image/ipq50xx.mk")],
               "IPQ95XX": [("qualcommbe", "ipq95xx", "target/linux/qualcommbe/image/ipq95xx.mk")],
               # IPQ40XX 整组已移除（用户要求：不编 ipq40xx 任何机型）
-              "IPQ806X": [("ipq806x", "generic",  "target/linux/ipq806x/image/generic.mk"),
-                          ("ipq806x", "chromium", "target/linux/ipq806x/image/chromium.mk")],
+              # IPQ806X-chromium 子目标已移除：该子目标只有 asus_onhub / tplink_onhub
+              # 两台机型（Chromium/OnHub），编译持续失败且无有效产物，合并到 generic 一起编会
+              # 导致整组校验失败，故不再纳入编译。
+              "IPQ806X": [("ipq806x", "generic", "target/linux/ipq806x/image/generic.mk")],
           }
           ALIASES = {
               "QUALCOMMAX": ["IPQ807X", "IPQ60XX", "IPQ50XX"],
