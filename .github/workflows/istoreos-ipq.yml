@@ -72,8 +72,8 @@ jobs:
               "IPQ50XX": [("qualcommax", "ipq50xx", "target/linux/qualcommax/image/ipq50xx.mk")],
               "IPQ95XX": [("qualcommbe", "ipq95xx", "target/linux/qualcommbe/image/ipq95xx.mk")],
               # IPQ40XX 整组已移除（用户要求：不编 ipq40xx 任何机型）
-              "IPQ806X": [("ipq806x", "generic",  "target/linux/ipq806x/image/generic.mk"),
-                          ("ipq806x", "chromium", "target/linux/ipq806x/image/chromium.mk")],
+              # chromium 子目标已移除（ASUS/TP-Link OnHub 两台编译失败，ChromeOS cros-vboot 镜像流程在 CI 上编不过）
+              "IPQ806X": [("ipq806x", "generic", "target/linux/ipq806x/image/generic.mk")],
           }
           ALIASES = {
               "QUALCOMMAX": ["IPQ807X", "IPQ60XX", "IPQ50XX"],
