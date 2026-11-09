@@ -1,9 +1,9 @@
 name: 🍞 iStoreOS MT798x Build (7981/7986)
 
-# 每周三 08:00 (北京时间) 自动编译 = UTC 周三 00:00
+# 每周一、周四 07:00 (北京时间) 自动编译 = UTC 周日/周三 23:00
 on:
   schedule:
-    - cron: '0 0 * * 3'
+    - cron: '0 23 * * 0,3'
   workflow_dispatch:
     inputs:
       groups:
