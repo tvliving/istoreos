@@ -1,0 +1,753 @@
+name: 🍞 iStoreOS Philips HY3000 Build 24.10.8
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: '额外固件包（空格分隔，默认已含 luci + iStore + WiFi 全套驱动）'
+        required: false
+        default: 'luci luci-compat luci-i18n-base-zh-cn luci-app-store kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware wpad-basic-mbedtls wireless-regdb iwinfo'
+      make_release:
+        description: '是否发布到 Release'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: istoreos-hy3000-2410-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DEVICE: philips_hy3000
+  # 编译目标版本：iStoreOS 24.10.8（上游 istoreos/istoreos 的 24.10 源码分支）
+  SRC_REPO: istoreos/istoreos
+  SRC_REF: istoreos-24.10
+  VERSION: 24.10.8
+
+jobs:
+  # ============================================================
+  # Job 1：确认注入锚点存在
+  # ============================================================
+  prepare:
+    name: 🧭 机型检查
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout 上游源码（仅取 filogic.mk 与 02_network/platform.sh）
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          sparse-checkout: |
+            target/linux/mediatek/image/filogic.mk
+            target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+            target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+          sparse-checkout-cone-mode: false
+
+      - name: 校验机型可注入
+        run: |
+          echo "## 🧭 机型检查" >> "$GITHUB_STEP_SUMMARY"
+          ok=1
+          grep -q "TARGET_DEVICES += openembed_som7981" target/linux/mediatek/image/filogic.mk \
+            && echo "✔ filogic.mk 存在插入锚点 openembed_som7981" || ok=0
+          grep -q "mediatek,mt7981-wmac" target/linux/mediatek/image/filogic.mk 2>/dev/null || true
+          grep -qE '^\s*qihoo,360t7\|\\$' target/linux/mediatek/filogic/base-files/etc/board.d/02_network \
+            && echo "✔ 02_network 存在 lan1-3+wan 分组锚点" || ok=0
+          c=$(grep -cE '^\s*huasifei,wh3000\|\\$' target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh || true)
+          [ "$c" = "2" ] && echo "✔ platform.sh 存在 2 处 eMMC 组锚点（升级/保配置）" || { echo "::error::platform.sh eMMC 锚点数=$c，预期 2"; ok=0; }
+          grep -q "kernel-bin | lzma | fit lzma" target/linux/mediatek/image/filogic.mk \
+            && echo "✔ 24.10 支持 fit-lzma 内核打包方式" || ok=0
+          [ "$ok" = "1" ] || { echo "::error::锚点校验失败，上游源码结构变化，注入无法进行"; exit 1; }
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✔ philips_hy3000（Philips HY3000，MT7981B，eMMC）——编译时注入 dts + filogic.mk 设备块 + 02_network + platform.sh" >> "$GITHUB_STEP_SUMMARY"
+
+  # ============================================================
+  # Job 2：编译
+  # ============================================================
+  build:
+    name: 🏗️ HY3000 (24.10.8)
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 上游源码（istoreos-24.10 = 24.10.8 系）
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          fetch-depth: 1
+
+      - name: 注入 HY3000 设备支持（dts + filogic.mk + 02_network + platform.sh）
+        run: |
+          # 1) dts：24.10（内核 6.6，ImmortalWrt 系）用 mt7981.dtsi；
+          #    WiFi 走 mt76（kmod-mt7915e），必须显式启用 &wifi 并接 eMMC factory 分区
+          #    的 eeprom(nvmem)——上游 padavanonly 版 hy3000 依赖 MTK mt_wifi 不需要
+          #    这一步，移植到 mt76 体系后不做就没有无线
+          cat > target/linux/mediatek/dts/mt7981b-philips-hy3000.dts <<'DTS'
+          // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+
+          /dts-v1/;
+          #include <dt-bindings/gpio/gpio.h>
+          #include <dt-bindings/input/input.h>
+          #include <dt-bindings/leds/common.h>
+
+          #include "mt7981.dtsi"
+
+          / {
+          	model = "Philips HY3000";
+          	compatible = "philips,hy3000", "mediatek,mt7981";
+
+          	aliases {
+          		led-boot = &status_red_led;
+          		led-failsafe = &status_red_led;
+          		led-running = &status_green_led;
+          		led-upgrade = &status_red_led;
+          		serial0 = &uart0;
+          	};
+
+          	chosen {
+          		bootargs = "root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
+          		stdout-path = "serial0:115200n8";
+          	};
+
+          	memory@40000000 {
+          		reg = <0 0x40000000 0 0x20000000>;
+          		device_type = "memory";
+          	};
+
+          	gpio-keys {
+          		compatible = "gpio-keys";
+
+          		button-reset {
+          			label = "reset";
+          			linux,code = <KEY_RESTART>;
+          			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+          		};
+
+          		button-mesh {
+          			label = "mesh";
+          			linux,code = <BTN_9>;
+          			linux,input-type = <EV_SW>;
+          			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+          		};
+          	};
+
+          	gpio-leds {
+          		compatible = "gpio-leds";
+
+          		status_red_led: led-0 {
+          			label = "red:status";
+          			gpios = <&pio 8 GPIO_ACTIVE_HIGH>;
+          		};
+
+          		status_green_led: led-1 {
+          			label = "green:status";
+          			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+          		};
+          	};
+          };
+
+          &mmc0 {
+          	bus-width = <8>;
+          	cap-mmc-highspeed;
+          	max-frequency = <52000000>;
+          	non-removable;
+          	pinctrl-names = "default", "state_uhs";
+          	pinctrl-0 = <&mmc0_pins_default>;
+          	pinctrl-1 = <&mmc0_pins_uhs>;
+          	vmmc-supply = <&reg_3p3v>;
+          	status = "okay";
+
+          	card@0 {
+          		compatible = "mmc-card";
+          		reg = <0>;
+
+          		block {
+          			compatible = "block-device";
+
+          			partitions {
+          				block-partition-factory {
+          					partname = "factory";
+
+          					nvmem-layout {
+          						compatible = "fixed-layout";
+          						#address-cells = <1>;
+          						#size-cells = <1>;
+
+          						eeprom_factory_0: eeprom@0 {
+          							reg = <0x0 0x1000>;
+          						};
+
+          						macaddr_factory_74: macaddr@74 {
+          							compatible = "mac-base";
+          							reg = <0x74 0x6>;
+          							#nvmem-cell-cells = <1>;
+          						};
+          					};
+          				};
+          			};
+          		};
+          	};
+          };
+
+          &eth {
+          	status = "okay";
+
+          	gmac0: mac@0 {
+          		compatible = "mediatek,eth-mac";
+          		reg = <0>;
+          		phy-mode = "2500base-x";
+
+          		nvmem-cells = <&macaddr_factory_74 0>;
+          		nvmem-cell-names = "mac-address";
+          		fixed-link {
+          			speed = <2500>;
+          			full-duplex;
+          			pause;
+          		};
+          	};
+
+          	gmac1: mac@1 {
+          		compatible = "mediatek,eth-mac";
+          		reg = <1>;
+          		phy-mode = "gmii";
+          		phy-handle = <&int_gbe_phy>;
+          	};
+          };
+
+          &mdio_bus {
+          	switch: switch@1f {
+          		compatible = "mediatek,mt7531";
+          		reg = <31>;
+          		reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+          		interrupt-controller;
+          		#interrupt-cells = <1>;
+          		interrupt-parent = <&pio>;
+          		interrupts = <38 IRQ_TYPE_LEVEL_HIGH>;
+          	};
+          };
+
+          &switch {
+          	ports {
+          		#address-cells = <1>;
+          		#size-cells = <0>;
+
+          		port@0 {
+          			reg = <0>;
+          			label = "wan";
+          		};
+
+          		port@1 {
+          			reg = <1>;
+          			label = "lan1";
+          		};
+
+          		port@2 {
+          			reg = <2>;
+          			label = "lan2";
+          		};
+
+          		port@3 {
+          			reg = <3>;
+          			label = "lan3";
+          		};
+
+          		port@6 {
+          			reg = <6>;
+          			ethernet = <&gmac0>;
+          			phy-mode = "2500base-x";
+
+          			fixed-link {
+          				speed = <2500>;
+          				full-duplex;
+          				pause;
+          			};
+          		};
+          	};
+          };
+
+          &pio {
+          	mmc0_pins_default: mmc0-pins-default {
+          		mux {
+          			function = "flash";
+          			groups = "emmc_45";
+          		};
+          	};
+
+          	mmc0_pins_uhs: mmc0-pins-uhs {
+          		mux {
+          			function = "flash";
+          			groups = "emmc_45";
+          		};
+          	};
+          };
+
+          &uart0 {
+          	status = "okay";
+          };
+
+          &usb_phy {
+          	status = "okay";
+          };
+
+          &watchdog {
+          	status = "okay";
+          };
+
+          &wifi {
+          	status = "okay";
+          	nvmem-cells = <&eeprom_factory_0>;
+          	nvmem-cell-names = "eeprom";
+          };
+
+          &xhci {
+          	status = "okay";
+          };
+          DTS
+
+          # 2) filogic.mk：追加 Device/philips_hy3000（WiFi 驱动包全量带齐）
+          python3 - <<'PY'
+          import io
+          p = "target/linux/mediatek/image/filogic.mk"
+          s = io.open(p, encoding="utf-8").read()
+          if "Device/philips_hy3000" in s:
+              print("HY3000 设备块已存在，跳过注入")
+          else:
+              B = [
+                "define Device/philips_hy3000",
+                "  DEVICE_VENDOR := Philips",
+                "  DEVICE_MODEL := HY3000",
+                "  DEVICE_DTS := mt7981b-philips-hy3000",
+                "  DEVICE_DTS_DIR := ../dts",
+                "  DEVICE_PACKAGES := kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware \\",
+                "	kmod-usb3 f2fsck mkf2fs",
+                "  KERNEL := kernel-bin | lzma | fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb",
+                "  KERNEL_INITRAMFS := kernel-bin | lzma | \\",
+                "	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k",
+                "  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata",
+                "  SUPPORTED_DEVICES += philips,hy3000",
+                "endef",
+                "TARGET_DEVICES += philips_hy3000",
+              ]
+              BLOCK = "\n".join(B) + "\n"
+              anchor = "TARGET_DEVICES += openembed_som7981\n"
+              assert anchor in s, "filogic.mk 里找不到插入锚点"
+              s = s.replace(anchor, anchor + "\n" + BLOCK, 1)
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+              print("已注入 Device/philips_hy3000")
+          PY
+
+          # 3) 02_network：lan1-3 + wan 分组与 MAC（factory 0x74，wan=lan+1）
+          python3 - <<'PY'
+          import io
+          p = "target/linux/mediatek/filogic/base-files/etc/board.d/02_network"
+          s = io.open(p, encoding="utf-8").read()
+          if "philips,hy3000" in s:
+              print("02_network 已含 hy3000，跳过")
+          else:
+              a1 = "\tqihoo,360t7|\\\n\trouterich,ax3000|\\\n"
+              assert s.count(a1) == 1, "02_network 接口锚点不唯一: %d" % s.count(a1)
+              s = s.replace(a1, "\tphilips,hy3000|\\\n" + a1, 1)
+              a2 = "\tqihoo,360t7)\n\t\tlan_mac=$(mtd_get_mac_ascii factory lanMac)"
+              assert s.count(a2) == 1, "02_network MAC 锚点不唯一: %d" % s.count(a2)
+              mac = ("\tphilips,hy3000)\n"
+                     "\t\tlan_mac=$(mmc_get_mac_binary factory 0x74)\n"
+                     "\t\twan_mac=$(macaddr_add \"$lan_mac\" 1)\n"
+                     "\t\tlabel_mac=$wan_mac\n"
+                     "\t\t;;\n")
+              s = s.replace(a2, mac + a2, 1)
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+              print("已注入 02_network（接口 + MAC）")
+          PY
+
+          # 4) platform.sh：两处 eMMC 组（升级 + 保配置）
+          python3 - <<'PY'
+          import io
+          p = "target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
+          s = io.open(p, encoding="utf-8").read()
+          if "philips,hy3000" in s:
+              print("platform.sh 已含 hy3000，跳过")
+          else:
+              a3 = "\thuasifei,wh3000|\\\n"
+              assert s.count(a3) == 2, "platform.sh eMMC 锚点数: %d（预期 2）" % s.count(a3)
+              s = s.replace(a3, "\tphilips,hy3000|\\\n" + a3)
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+              print("已注入 platform.sh（emmc_do_upgrade / emmc_copy_config）")
+          PY
+
+          echo "===== 注入结果 ====="
+          grep -n "philips" target/linux/mediatek/image/filogic.mk | head -3
+          grep -n "philips" target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+          grep -n "philips" target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh
+
+      - name: 释放磁盘空间
+        run: |
+          echo "===== 释放前 ====="
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /usr/local/.ghcup /var/lib/snapd 2>/dev/null || true
+          sudo systemctl stop docker docker.socket 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /home/runner/.cache \
+                      /home/runner/.npm /home/runner/.dotnet 2>/dev/null || true
+          sudo journalctl --vacuum-size=50M 2>/dev/null || true
+          sudo rm -rf /var/lib/systemd/coredump 2>/dev/null || true
+          echo "===== 释放后 ====="
+          df -h / | tail -1
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            libelf-dev python3-dev python3-setuptools rsync unzip zlib1g-dev \
+            file wget ccache zstd swig time xsltproc subversion bc patch bzip2 \
+            libtool-bin pkg-config autoconf automake
+          sudo apt-get install -y -qq perl libthread-queue-any-perl 2>/dev/null || true
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-hy3000-2410-${{ github.sha }}
+          restore-keys: |
+            ccache-hy3000-2410-
+            ccache-
+
+      - name: 更新 feeds（带重试与逐条诊断）
+        run: |
+          set -o pipefail
+          echo "== feeds.conf.default ==" && cat feeds.conf.default
+          ok=0
+          for i in 1 2 3; do
+            if ./scripts/feeds update -a 2>&1 | tee feeds-update.log | tail -20; then ok=1; break; fi
+            echo "::warning::feeds update 第 $i 次失败，10 秒后重试"
+            grep -iE "fatal|error|not found|404" feeds-update.log | head -10 || true
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::feeds update 连续 3 次失败，上面的 fatal/404 行就是坏掉的源"
+            exit 1
+          fi
+
+          ok=0
+          for i in 1 2 3; do
+            if ./scripts/feeds install -a 2>&1 | tee feeds-install.log | tail -5; then ok=1; break; fi
+            echo "::warning::feeds install 第 $i 次失败，10 秒后重试"
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::feeds install 失败"
+            grep -iE "error|warning: \|" feeds-install.log | tail -20 || true
+            exit 1
+          fi
+
+      - name: 生成 .config（单机型 + 自动规避 feeds 的 Kconfig 递归依赖）
+        env:
+          DEVICE: philips_hy3000
+          PACKAGES: ${{ inputs.packages || 'luci luci-compat luci-i18n-base-zh-cn luci-app-store kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware wpad-basic-mbedtls wireless-regdb iwinfo' }}
+          PROTECTED: luci luci-base luci-compat luci-app-store istoreos-files base-files kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware wpad-basic-mbedtls wireless-regdb
+        run: |
+          cat > gen_config.py <<'PY'
+          import os, re, sys
+
+          want = [os.environ["DEVICE"]]
+          norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
+
+          meta = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
+
+          raw = re.findall(r"^\s*menuconfig\s+(TARGET_DEVICE_mediatek_filogic_DEVICE_\S+)\s*$",
+                           meta, re.M)
+          pref = "TARGET_DEVICE_mediatek_filogic_DEVICE_"
+          syms = {}
+          for s in raw:
+              syms[norm(s[len(pref):])] = "CONFIG_" + s
+          print("元数据 filogic 机型符号: %d 行 -> %d 个唯一机型" % (len(raw), len(syms)))
+          if not syms:
+              print("::error::元数据里没有 filogic 机型符号（tmp/.config-target.in 不完整）")
+              sys.exit(1)
+
+          multi = "TARGET_MULTI_PROFILE" in meta
+          print("元数据含 Target Devices 菜单（需 MULTI_PROFILE）: %s" % multi)
+
+          picked, missing = [], []
+          for d in want:
+              s = syms.get(norm(d))
+              (picked.append(s) if s else missing.append(d))
+          if missing:
+              print("::error::源码树中不存在这些机型: %s" % " ".join(missing))
+              sys.exit(1)
+
+          pkgs = [p for p in os.environ.get("PACKAGES", "").split() if p]
+          lines = ["CONFIG_TARGET_mediatek=y",
+                   "CONFIG_TARGET_mediatek_filogic=y",
+                   "CONFIG_DEVEL=y",
+                   "CONFIG_CCACHE=y"]
+          if multi:
+              lines += ["CONFIG_TARGET_MULTI_PROFILE=y",
+                        "# CONFIG_TARGET_ALL_PROFILES is not set",
+                        "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"]
+          lines += ["%s=y" % s for s in picked]
+          lines += ["CONFIG_PACKAGE_%s=y" % p for p in pkgs]
+          open(".config", "w").write("\n".join(lines) + "\n")
+          open("wanted.txt", "w").write("\n".join(want) + "\n")
+          print("已写入 %d 台机型 + %d 个额外包" % (len(picked), len(pkgs)))
+          PY
+
+          cat > verify_config.py <<'PY'
+          import re, sys
+
+          want = [l.strip() for l in open("wanted.txt") if l.strip()]
+          cfg = open(".config", encoding="utf-8", errors="replace").read()
+          norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
+          got = {norm(m) for m in
+                 re.findall(r"^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)=y$", cfg, re.M)}
+          wset = {norm(w): w for w in want}
+          lost = [w for k, w in wset.items() if k not in got]
+          print("预期 %d 台，.config 实际选中 %d 台" % (len(wset), len(got & set(wset))))
+          if lost:
+              print("::warning::被 kconfig 丢弃 %d 台: %s" % (len(lost), " ".join(lost)))
+              mp = [l.strip() for l in cfg.splitlines() if "MULTI_PROFILE" in l]
+              print("MULTI_PROFILE 状态: %s" % (mp or "（.config 里没有该符号）"))
+              sys.exit(1)
+          # WiFi 驱动复核：缺任何一个 LuCI 就没有无线
+          missing_wifi = 0
+          for p in ("kmod-mt7915e", "kmod-mt7981-firmware", "mt7981-wo-firmware",
+                    "wpad-basic-mbedtls", "wireless-regdb"):
+              flag = "CONFIG_PACKAGE_%s=y" % p
+              ok = flag in cfg
+              print(("OK   " if ok else "MISS ") + flag)
+              missing_wifi += 0 if ok else 1
+          for p in ("luci", "luci-app-store", "istoreos-files"):
+              flag = "CONFIG_PACKAGE_%s=y" % p
+              print(("OK   " if flag in cfg else "WARN ") + flag)
+          if missing_wifi:
+              print("::error::WiFi 驱动包缺失 %d 个，固件将没有无线" % missing_wifi)
+              sys.exit(1)
+          PY
+
+          mkdir -p tmp
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::group::第 ${attempt} 次生成 .config"
+
+            if ! make -j1 prepare-tmpinfo > prepare.log 2>&1; then
+              tail -40 prepare.log
+              echo "::endgroup::"
+              echo "::error::prepare-tmpinfo 失败（主机依赖缺失或 package 元数据有错），见上方日志"
+              exit 1
+            fi
+            grep -E "Please install|Build dependency|Failed to build" prepare.log | head -10 || true
+
+            python3 gen_config.py
+
+            if ! make -j1 defconfig > defconfig.log 2>&1; then
+              tail -40 defconfig.log
+              echo "::endgroup::"
+              echo "::error::make defconfig 执行失败"
+              exit 1
+            fi
+
+            vrc=0
+            python3 verify_config.py || vrc=$?
+
+            if [ "$vrc" = "0" ]; then
+              ok=1
+              echo "::endgroup::"
+              break
+            fi
+
+            if grep -q "recursive dependency detected" defconfig.log; then
+              echo "::warning::检测到 Kconfig 递归依赖（feed 元数据 bug），禁用问题包后重试"
+              grep -A2 "recursive dependency detected" defconfig.log | head -8 || true
+              bad=$(grep -oE "symbol PACKAGE_[A-Za-z0-9_.+-]+ depends on PACKAGE_" defconfig.log \
+                    | sed -E 's/^symbol PACKAGE_([^ ]+) .*/\1/' | sort -u)
+              echo "问题包: ${bad:-（未解析出包名）}"
+              changed=0
+              for p in $bad; do
+                if echo " $PROTECTED " | grep -q " $p "; then
+                  echo "::error::$p 属于必需包（含 WiFi 驱动），不能自动禁用，请手工修 feed"
+                  echo "::endgroup::"
+                  exit 1
+                fi
+                while IFS= read -r d; do
+                  [ -z "$d" ] && continue
+                  if [ -f "$d/Makefile" ]; then
+                    mv "$d/Makefile" "$d/Makefile.disabled"
+                    echo "已禁用: $d"
+                    changed=1
+                  fi
+                done < <(find feeds package/feeds -maxdepth 3 -type d -name "$p" 2>/dev/null || true)
+              done
+              echo "::endgroup::"
+              if [ "$changed" = "1" ]; then
+                rm -f tmp/.packageinfo tmp/.config-package.in
+                continue
+              fi
+              echo "::error::检测到递归依赖但没定位到包目录，见 defconfig.log"
+              exit 1
+            fi
+
+            echo "::error::.config 校验未通过，且 defconfig 没有递归依赖报错"
+            echo "===== .config 前 25 行 ====="
+            head -25 .config || true
+            echo "===== defconfig.log 尾部 ====="
+            tail -30 defconfig.log || true
+            echo "::endgroup::"
+            exit 1
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "::error::尝试 3 次仍未得到有效 .config"
+            exit 1
+          fi
+
+      - name: 预下载软件包
+        run: |
+          make download -j8 || echo "::warning::make download 有失败项，构建时会重试"
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          nproc
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::并行编译失败（静默模式下失败包的报错被吞），用 -j1 V=s 重跑失败包捕获真实错误"
+            FAILED=$(grep -oE "ERROR: \S+ failed to build( \(build variant: \S+\))?" build.log | awk '{print $2}' | sort -u || true)
+            if [ -z "$FAILED" ]; then
+              echo "未提取到失败包名，对全树 -j1 V=s 复现（到失败点即停）"
+              make -j1 V=s 2>&1 | tee error.log || true
+            else
+              for p in $FAILED; do
+                case "$p" in
+                  target/linux|package/*)
+                    echo "===== V=s 复现 $p ====="
+                    make -j1 V=s "$p/compile" 2>&1 | tee -a error.log || true ;;
+                  *)
+                    echo "未知失败目标 $p，跳过 V=s";;
+                esac
+              done
+            fi
+            echo "===== error.log 尾部 150 行（真实错误） ====="
+            tail -n 150 error.log 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: 失败诊断
+        if: failure()
+        run: |
+          for f in prepare.log defconfig.log feeds-update.log feeds-install.log build.log error.log; do
+            if [ -f "$f" ]; then
+              echo "===== $f （尾部 40 行） ====="
+              tail -40 "$f" || true
+            fi
+          done
+          echo "===== .config 前 15 行 ====="
+          head -15 .config 2>/dev/null || true
+
+      - name: 上传编译日志（失败时用于排查）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-hy3000-2410
+          path: |
+            *.log
+            .config
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 校验产物
+        run: |
+          mkdir -p out
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f \
+            \( -name '*philips*hy3000*squashfs-sysupgrade*' -o -name 'sha256sums' -o -name 'profiles.json' \
+               -o -name '*.buildinfo' -o -name '*.manifest' \) \
+            -exec cp {} out/ \; 2>/dev/null || true
+          # initramfs 一并保留（首次从原厂固件切换到 iStoreOS 时可 tmp 刷入）
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*philips*hy3000*initramfs*' \
+            -exec cp {} out/ \; 2>/dev/null || true
+
+          if ! ls out/ 2>/dev/null | grep -qE "philips.*hy3000.*squashfs-sysupgrade"; then
+            echo "::error::$DEVICE 没有找到 squashfs-sysupgrade 产物"
+            ls -la out/ bin/targets/mediatek/filogic/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "产物文件数: $(ls out | wc -l)"
+          {
+            echo "## 🏗️ iStoreOS 24.10.8 · Philips HY3000 编译完成"
+            echo ""
+            echo "- 产物文件: $(ls out | wc -l) 个"
+            echo "- WiFi: mt76（kmod-mt7915e）+ wpad，LuCI 网络→无线可用"
+            echo ""
+            echo "| 文件 |"
+            echo "|---|"
+            ls out | while read -r f; do echo "| $f |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-hy3000-2410
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3：发布到 Release（只新增，绝不删除/覆盖历史 release）
+  # ============================================================
+  release:
+    name: 📦 发布 Release
+    needs: [prepare, build]
+    if: |
+      always() && needs.build.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.make_release)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: images-hy3000-2410
+          path: rel
+
+      - name: 生成校验文件
+        run: |
+          cd rel
+          ls -lh
+          sha256sum * > sha256sums.txt 2>/dev/null || true
+
+      - name: 创建 Release（istoreos-hy3000-2410-日期，同日重跑自动加 -r<run号>）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="istoreos-hy3000-2410-$(TZ=Asia/Shanghai date +%Y%m%d)"
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            TAG="$TAG-r${GITHUB_RUN_NUMBER}"
+          fi
+          cat > notes.md <<EOF
+          iStoreOS 24.10.8（源码 istoreos/istoreos istoreos-24.10 分支）自动编译
+          （Philips HY3000，MT7981B，eMMC）
+
+          - 触发方式: ${{ github.event_name }}
+          - 机型: philips_hy3000（MT7981B + MT7531，2.5G 上行，eMMC）
+          - 提交: ${{ github.sha }}
+          - 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          WiFi：mt76（kmod-mt7915e）+ wpad，2.4G/5G 双频，LuCI 网络→无线可用。
+          设备支持（dts/设备块/网络配置/eMMC 升级）由 workflow 注入，参考 tvliving/immortalwrt-mt798x-action 的 hy3000。
+          首次刷机可用 initramfs 镜像或参考 HY3000 的 uboot 刷机方式。
+          EOF
+          gh release create "$TAG" rel/* \
+            --title "iStoreOS HY3000 · 24.10.8 · $TAG" \
+            --notes-file notes.md \
+            --latest
