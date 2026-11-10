@@ -1,0 +1,527 @@
+name: 🍞 iStoreOS Cudy TR3000 512MB Build 24.10.8
+
+# 每周一、周四 07:00 (北京时间) 自动编译 = UTC 周日/周三 23:00
+on:
+  schedule:
+    - cron: '0 23 * * 0,3'
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: '1、额外固件包（空格分隔，默认已含 luci + iStore）'
+        required: false
+        default: 'luci luci-compat luci-i18n-base-zh-cn luci-app-store'
+      make_release:
+        description: '2、是否发布到 Release'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: istoreos-tr3000-512-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  DEVICE: cudy_tr3000-512mb-v1
+  # 编译目标版本：iStoreOS 24.10.8（上游 istoreos/istoreos 的 24.10 源码分支）
+  SRC_REPO: istoreos/istoreos
+  SRC_REF: istoreos-24.10
+  VERSION: 24.10.8
+
+jobs:
+  # ============================================================
+  # Job 1：确认机型已在源码树中
+  # ============================================================
+  prepare:
+    name: 🧭 机型检查
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout 上游源码（仅取 filogic.mk 与 tr3000 dtsi）
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          sparse-checkout: |
+            target/linux/mediatek/image/filogic.mk
+            target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dtsi
+          sparse-checkout-cone-mode: false
+
+      - name: 校验机型可移植
+        run: |
+          # 512MB dts 基于树内 tr3000-v1.dtsi，先确认基础存在；设备定义由 build 注入
+          if [ -f target/linux/mediatek/dts/mt7981b-cudy-tr3000-v1.dtsi ]; then
+            echo "✔ 上游树含 mt7981b-cudy-tr3000-v1.dtsi，可注入 512MB 变体"
+            echo "## 🧭 机型检查" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "✔ cudy_tr3000-512mb-v1（Cudy TR3000 512MB v1，MT7981，512MB NAND）——编译时注入 dts + filogic.mk 设备块" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::上游源码树缺少 mt7981b-cudy-tr3000-v1.dtsi，512MB 变体无法移植"
+            exit 1
+          fi
+          if grep -q "TARGET_DEVICES += cudy_tr3000-256mb-v1" target/linux/mediatek/image/filogic.mk; then
+            echo "✔ filogic.mk 存在插入锚点 cudy_tr3000-256mb-v1"
+          else
+            echo "::warning::filogic.mk 没有 256mb 锚点，注入时将追加到 cudy_tr3000-v1 之后"
+          fi
+
+  # ============================================================
+  # Job 2：编译
+  # ============================================================
+  build:
+    name: 🏗️ TR3000 512MB
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout 上游源码（istoreos-24.10 = 24.10.8 系）
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ env.SRC_REF }}
+          fetch-depth: 1
+
+      - name: 注入 TR3000 512MB 设备支持（dts + filogic.mk）
+        run: |
+          # 1) dts：基于树内 mt7981b-cudy-tr3000-v1.dtsi，
+          #    保留 spi-cal 与 NMBM 坏块管理，ubi 分区 0x5c0000 + 0x1FA40000（512MB NAND）
+          cat > target/linux/mediatek/dts/mt7981b-cudy-tr3000-512mb-v1.dts <<'DTS'
+          // SPDX-License-Identifier: (GPL-2.0 OR MIT)
+
+          /dts-v1/;
+          #include "mt7981b-cudy-tr3000-v1.dtsi"
+
+          / {
+          	model = "Cudy TR3000 512MB v1";
+          	compatible = "cudy,tr3000-v1", "mediatek,mt7981";
+          };
+
+          &spi_nand {
+          	spi-cal-enable;
+          	spi-cal-mode = "read-data";
+          	spi-cal-datalen = <7>;
+          	spi-cal-data = /bits/ 8 <0x53 0x50 0x49 0x4E 0x41 0x4E 0x44>;
+          	spi-cal-addrlen = <5>;
+          	spi-cal-addr = /bits/ 32 <0x0 0x0 0x0 0x0 0x0>;
+
+          	mediatek,nmbm;
+          	mediatek,bmt-max-ratio = <1>;
+          	mediatek,bmt-max-reserved-blocks = <64>;
+          };
+
+          &ubi {
+          	reg = <0x005c0000 0x1FA40000>;
+          };
+          DTS
+
+          # 2) filogic.mk：追加 Device/cudy_tr3000-512mb-v1（参数与 istoreos-25.12 一致）
+          python3 - <<'PY'
+          import io
+          p = "target/linux/mediatek/image/filogic.mk"
+          s = io.open(p, encoding="utf-8").read()
+          if "Device/cudy_tr3000-512mb-v1" in s:
+              print("512MB 设备块已存在，跳过注入")
+          else:
+              B = [
+                "define Device/cudy_tr3000-512mb-v1",
+                "  DEVICE_VENDOR := Cudy",
+                "  DEVICE_MODEL := TR3000",
+                "  DEVICE_VARIANT := 512mb v1",
+                "  DEVICE_DTS := mt7981b-cudy-tr3000-512mb-v1",
+                "  DEVICE_DTS_DIR := ../dts",
+                "  SUPPORTED_DEVICES += R47",
+                "  UBINIZE_OPTS := -E 5",
+                "  BLOCKSIZE := 128k",
+                "  PAGESIZE := 2048",
+                "  IMAGE_SIZE := 520000k",
+                "  KERNEL_IN_UBI := 1",
+                "  IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata",
+                "  DEVICE_PACKAGES := kmod-usb3 kmod-mt7915e kmod-mt7981-firmware mt7981-wo-firmware",
+                "endef",
+                "TARGET_DEVICES += cudy_tr3000-512mb-v1",
+              ]
+              BLOCK = "\n".join(B) + "\n"
+              anchor = "TARGET_DEVICES += cudy_tr3000-256mb-v1\n"
+              if anchor not in s:
+                  anchor = "TARGET_DEVICES += cudy_tr3000-v1\n"
+              assert anchor in s, "filogic.mk 里找不到插入锚点"
+              s = s.replace(anchor, anchor + "\n" + BLOCK, 1)
+              io.open(p, "w", encoding="utf-8", newline="\n").write(s)
+              print("已注入 Device/cudy_tr3000-512mb-v1")
+          PY
+
+          grep -n "cudy_tr3000-512mb-v1" target/linux/mediatek/image/filogic.mk | head -3
+
+      - name: 释放磁盘空间
+        run: |
+          echo "===== 释放前 ====="
+          df -h / | tail -1
+          # 大型预装组件：dotnet/android/ghc/CodeQL/boost/node/jvm
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/share/boost \
+                      /usr/local/lib/node_modules /usr/lib/jvm \
+                      /usr/share/swift /usr/share/miniconda /usr/share/rust \
+                      /usr/share/kotlinc /usr/share/gradle-* /opt/az \
+                      /usr/local/.ghcup /var/lib/snapd 2>/dev/null || true
+          # Docker 镜像与容器层（编译用不到，可释放 6-10GB）
+          sudo systemctl stop docker docker.socket 2>/dev/null || true
+          sudo rm -rf /var/lib/docker /var/lib/containerd 2>/dev/null || true
+          # apt 缓存与用户缓存
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /home/runner/.cache \
+                      /home/runner/.npm /home/runner/.dotnet 2>/dev/null || true
+          # 系统日志与崩溃转储
+          sudo journalctl --vacuum-size=50M 2>/dev/null || true
+          sudo rm -rf /var/lib/systemd/coredump 2>/dev/null || true
+          echo "===== 释放后 ====="
+          df -h / | tail -1
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
+            libelf-dev python3-dev python3-setuptools rsync unzip zlib1g-dev \
+            file wget ccache zstd swig time xsltproc subversion bc patch bzip2 \
+            libtool-bin pkg-config autoconf automake
+          sudo apt-get install -y -qq perl libthread-queue-any-perl 2>/dev/null || true
+
+      - name: 恢复 ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-tr3000-512-2410-${{ github.sha }}
+          restore-keys: |
+            ccache-tr3000-512-2410-
+            ccache-
+
+      - name: 更新 feeds（带重试与逐条诊断）
+        run: |
+          set -o pipefail
+          echo "== feeds.conf.default ==" && cat feeds.conf.default
+          ok=0
+          for i in 1 2 3; do
+            if ./scripts/feeds update -a 2>&1 | tee feeds-update.log | tail -20; then ok=1; break; fi
+            echo "::warning::feeds update 第 $i 次失败，10 秒后重试"
+            grep -iE "fatal|error|not found|404" feeds-update.log | head -10 || true
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::feeds update 连续 3 次失败，上面的 fatal/404 行就是坏掉的源"
+            exit 1
+          fi
+
+          ok=0
+          for i in 1 2 3; do
+            if ./scripts/feeds install -a 2>&1 | tee feeds-install.log | tail -5; then ok=1; break; fi
+            echo "::warning::feeds install 第 $i 次失败，10 秒后重试"
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::feeds install 失败"
+            grep -iE "error|warning: \|" feeds-install.log | tail -20 || true
+            exit 1
+          fi
+
+      - name: 生成 .config（单机型 + 自动规避 feeds 的 Kconfig 递归依赖）
+        env:
+          DEVICE: cudy_tr3000-512mb-v1
+          PACKAGES: ${{ inputs.packages || 'luci luci-compat luci-i18n-base-zh-cn luci-app-store' }}
+          PROTECTED: luci luci-base luci-compat luci-app-store istoreos-files base-files
+        run: |
+          cat > gen_config.py <<'PY'
+          import os, re, sys
+
+          want = [os.environ["DEVICE"]]
+          norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
+
+          meta = open("tmp/.config-target.in", encoding="utf-8", errors="replace").read()
+
+          # 机型符号在元数据里是：menuconfig TARGET_DEVICE_<boardconf>_DEVICE_<dev>
+          raw = re.findall(r"^\s*menuconfig\s+(TARGET_DEVICE_mediatek_filogic_DEVICE_\S+)\s*$",
+                           meta, re.M)
+          pref = "TARGET_DEVICE_mediatek_filogic_DEVICE_"
+          syms = {}
+          for s in raw:
+              syms[norm(s[len(pref):])] = "CONFIG_" + s
+          print("元数据 filogic 机型符号: %d 行 -> %d 个唯一机型" % (len(raw), len(syms)))
+          if not syms:
+              print("::error::元数据里没有 filogic 机型符号（tmp/.config-target.in 不完整）")
+              sys.exit(1)
+
+          # Target Devices 菜单 depends on TARGET_MULTI_PROFILE，必须显式打开
+          multi = "TARGET_MULTI_PROFILE" in meta
+          print("元数据含 Target Devices 菜单（需 MULTI_PROFILE）: %s" % multi)
+
+          picked, missing = [], []
+          for d in want:
+              s = syms.get(norm(d))
+              (picked.append(s) if s else missing.append(d))
+          if missing:
+              print("::error::源码树中不存在这些机型: %s" % " ".join(missing))
+              sys.exit(1)
+
+          pkgs = [p for p in os.environ.get("PACKAGES", "").split() if p]
+          lines = ["CONFIG_TARGET_mediatek=y",
+                   "CONFIG_TARGET_mediatek_filogic=y",
+                   "CONFIG_DEVEL=y",
+                   "CONFIG_CCACHE=y"]
+          if multi:
+              lines += ["CONFIG_TARGET_MULTI_PROFILE=y",
+                        "# CONFIG_TARGET_ALL_PROFILES is not set",
+                        "CONFIG_TARGET_PER_DEVICE_ROOTFS=y"]
+          lines += ["%s=y" % s for s in picked]
+          lines += ["CONFIG_PACKAGE_%s=y" % p for p in pkgs]
+          open(".config", "w").write("\n".join(lines) + "\n")
+          open("wanted.txt", "w").write("\n".join(want) + "\n")
+          print("已写入 %d 台机型 + %d 个额外包" % (len(picked), len(pkgs)))
+          PY
+
+          cat > verify_config.py <<'PY'
+          import re, sys
+
+          want = [l.strip() for l in open("wanted.txt") if l.strip()]
+          cfg = open(".config", encoding="utf-8", errors="replace").read()
+          norm = lambda s: re.sub(r"[^a-z0-9]", "_", s.lower())
+          got = {norm(m) for m in
+                 re.findall(r"^CONFIG_TARGET_DEVICE_mediatek_filogic_DEVICE_(\S+)=y$", cfg, re.M)}
+          wset = {norm(w): w for w in want}
+          lost = [w for k, w in wset.items() if k not in got]
+          print("预期 %d 台，.config 实际选中 %d 台" % (len(wset), len(got & set(wset))))
+          if lost:
+              print("::warning::被 kconfig 丢弃 %d 台: %s" % (len(lost), " ".join(lost)))
+              mp = [l.strip() for l in cfg.splitlines() if "MULTI_PROFILE" in l]
+              print("MULTI_PROFILE 状态: %s" % (mp or "（.config 里没有该符号）"))
+              sys.exit(1)
+          for p in ("luci", "luci-app-store", "istoreos-files"):
+              flag = "CONFIG_PACKAGE_%s=y" % p
+              print(("OK   " if flag in cfg else "WARN ") + flag)
+          PY
+
+          mkdir -p tmp
+          ok=0
+          for attempt in 1 2 3; do
+            echo "::group::第 ${attempt} 次生成 .config"
+
+            # 1) defconfig 前置：主机检查 + 元数据扫描
+            if ! make -j1 prepare-tmpinfo > prepare.log 2>&1; then
+              tail -40 prepare.log
+              echo "::endgroup::"
+              echo "::error::prepare-tmpinfo 失败（主机依赖缺失或 package 元数据有错），见上方日志"
+              exit 1
+            fi
+            grep -E "Please install|Build dependency|Failed to build" prepare.log | head -10 || true
+
+            # 2) 用权威元数据生成 .config 种子
+            python3 gen_config.py
+
+            # 3) defconfig —— kconfig 遇递归依赖时仍会写出 .config 并 exit 0，只能事后复核
+            if ! make -j1 defconfig > defconfig.log 2>&1; then
+              tail -40 defconfig.log
+              echo "::endgroup::"
+              echo "::error::make defconfig 执行失败"
+              exit 1
+            fi
+
+            # 4) 复核台数
+            vrc=0
+            python3 verify_config.py || vrc=$?
+
+            if [ "$vrc" = "0" ]; then
+              ok=1
+              echo "::endgroup::"
+              break
+            fi
+
+            # 5) feed 的 Kconfig 递归依赖：禁用问题包后重试
+            if grep -q "recursive dependency detected" defconfig.log; then
+              echo "::warning::检测到 Kconfig 递归依赖（feed 元数据 bug），禁用问题包后重试"
+              grep -A2 "recursive dependency detected" defconfig.log | head -8 || true
+              bad=$(grep -oE "symbol PACKAGE_[A-Za-z0-9_.+-]+ depends on PACKAGE_" defconfig.log \
+                    | sed -E 's/^symbol PACKAGE_([^ ]+) .*/\1/' | sort -u)
+              echo "问题包: ${bad:-（未解析出包名）}"
+              changed=0
+              for p in $bad; do
+                if echo " $PROTECTED " | grep -q " $p "; then
+                  echo "::error::$p 属于必需包，不能自动禁用，请手工修 feed"
+                  echo "::endgroup::"
+                  exit 1
+                fi
+                while IFS= read -r d; do
+                  [ -z "$d" ] && continue
+                  if [ -f "$d/Makefile" ]; then
+                    mv "$d/Makefile" "$d/Makefile.disabled"
+                    echo "已禁用: $d"
+                    changed=1
+                  fi
+                done < <(find feeds package/feeds -maxdepth 3 -type d -name "$p" 2>/dev/null || true)
+              done
+              echo "::endgroup::"
+              if [ "$changed" = "1" ]; then
+                rm -f tmp/.packageinfo tmp/.config-package.in
+                continue
+              fi
+              echo "::error::检测到递归依赖但没定位到包目录，见 defconfig.log"
+              exit 1
+            fi
+
+            # 6) 其它原因：一次性打印全部诊断信息
+            echo "::error::.config 校验未通过，且 defconfig 没有递归依赖报错"
+            echo "===== .config 前 25 行 ====="
+            head -25 .config || true
+            echo "===== defconfig.log 尾部 ====="
+            tail -30 defconfig.log || true
+            echo "::endgroup::"
+            exit 1
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "::error::尝试 3 次仍未得到有效 .config"
+            exit 1
+          fi
+
+      - name: 预下载软件包
+        run: |
+          make download -j8 || echo "::warning::make download 有失败项，构建时会重试"
+
+      - name: 编译
+        run: |
+          set -o pipefail
+          nproc
+          make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::并行编译失败（静默模式下失败包的报错被吞），用 -j1 V=s 重跑失败包捕获真实错误"
+            FAILED=$(grep -oE "ERROR: \S+ failed to build( \(build variant: \S+\))?" build.log | awk '{print $2}' | sort -u || true)
+            if [ -z "$FAILED" ]; then
+              echo "未提取到失败包名，对全树 -j1 V=s 复现（到失败点即停）"
+              make -j1 V=s 2>&1 | tee error.log || true
+            else
+              for p in $FAILED; do
+                case "$p" in
+                  target/linux|package/*)
+                    echo "===== V=s 复现 $p ====="
+                    make -j1 V=s "$p/compile" 2>&1 | tee -a error.log || true ;;
+                  *)
+                    echo "未知失败目标 $p，跳过 V=s";;
+                esac
+              done
+            fi
+            echo "===== error.log 尾部 150 行（真实错误） ====="
+            tail -n 150 error.log 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: 失败诊断
+        if: failure()
+        run: |
+          for f in prepare.log defconfig.log feeds-update.log feeds-install.log build.log error.log; do
+            if [ -f "$f" ]; then
+              echo "===== $f （尾部 40 行） ====="
+              tail -40 "$f" || true
+            fi
+          done
+          echo "===== .config 前 15 行 ====="
+          head -15 .config 2>/dev/null || true
+
+      - name: 上传编译日志（失败时用于排查）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-tr3000-512
+          path: |
+            *.log
+            .config
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 校验产物
+        run: |
+          mkdir -p out
+          # 多分区 uboot 刷不进 initramfs-kernel.bin，只收集可直接刷 490M ubi 分区的
+          # squashfs-sysupgrade.bin（外加元数据文件）
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f \
+            \( -name '*squashfs-sysupgrade.bin' -o -name 'sha256sums' -o -name 'profiles.json' \
+               -o -name '*.buildinfo' -o -name '*.manifest' \) \
+            -exec cp {} out/ \; 2>/dev/null || true
+
+          if ! ls out/ 2>/dev/null | grep -qE "tr3000-512mb.*-squashfs-sysupgrade\.bin"; then
+            echo "::error::$DEVICE 没有找到 squashfs-sysupgrade.bin"
+            ls -la out/ bin/targets/mediatek/filogic/ 2>/dev/null || true
+            exit 1
+          fi
+          if ls out/ 2>/dev/null | grep -q "initramfs"; then
+            echo "::error::initramfs 镜像不应出现在产物里"; exit 1
+          fi
+          echo "产物文件数: $(ls out | wc -l)"
+
+          {
+            echo "## 🏗️ Cudy TR3000 512MB 编译完成"
+            echo ""
+            echo "- 产物文件: $(ls out | wc -l) 个"
+            echo ""
+            echo "| 文件 |"
+            echo "|---|"
+            ls out | while read -r f; do echo "| $f |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: images-tr3000-512
+          path: out/
+          retention-days: 14
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3：发布到 Release（只新增，绝不删除/覆盖历史 release）
+  # ============================================================
+  release:
+    name: 📦 发布 Release
+    needs: [prepare, build]
+    if: |
+      always() && needs.build.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.make_release)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: images-tr3000-512
+          path: rel
+
+      - name: 生成校验文件
+        run: |
+          cd rel
+          ls -lh
+          sha256sum * > sha256sums.txt 2>/dev/null || true
+
+      - name: 创建 Release（istoreos-tr3000-512-2410-日期，同日重跑自动加 -r<run号>）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="istoreos-tr3000-512-2410-$(TZ=Asia/Shanghai date +%Y%m%d)"
+          # 同日已有 release 时追加 run 号，绝不覆盖历史
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            TAG="$TAG-r${GITHUB_RUN_NUMBER}"
+          fi
+          cat > notes.md <<EOF
+          iStoreOS 24.10.8（源码 istoreos/istoreos istoreos-24.10 分支）自动编译
+          （Cudy TR3000 512MB v1）
+
+          - 触发方式: ${{ github.event_name }}
+          - 机型: cudy_tr3000-512mb-v1（MT7981，512MB NAND，ubi 分区 0x1FA40000）
+          - 提交: ${{ github.sha }}
+          - 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          适用于硬改 512MB Flash 的 Cudy TR3000（128MB 原版请用 cudy_tr3000-v1 固件，刷错会变砖）。
+          本机是多分区 uboot，initramfs-kernel.bin 刷不进，Release 里只放
+          可直接刷 490M ubi 分区的 squashfs-sysupgrade.bin。
+          EOF
+          gh release create "$TAG" rel/* \
+            --title "iStoreOS TR3000 512MB · $TAG" \
+            --notes-file notes.md \
+            --latest
