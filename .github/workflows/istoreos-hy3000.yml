@@ -216,20 +216,25 @@ jobs:
         run: |
           mkdir -p out
           find bin/targets/mediatek/filogic -maxdepth 1 -type f \
-            \( -name '*squashfs-sysupgrade*' -o -name '*squashfs-factory*' \
+            \( -name '*philips*hy3000*sysupgrade.itb' \
+               -o -name '*philips*hy3000*gpt.bin' \
+               -o -name '*philips*hy3000*preloader.bin' \
+               -o -name '*philips*hy3000*bl31-uboot.fip' \
                -o -name 'sha256sums' -o -name 'profiles.json' \
                -o -name '*.buildinfo' -o -name '*.manifest' \) \
-            ! -name '*json*json*' \
             -exec cp {} out/ \; 2>/dev/null || true
-          # initramfs 一并保留（首次从原厂固件切换到 iStoreOS 时可 tmp 刷入）
-          find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*initramfs*' \
+          # recovery（initramfs）一并保留：U-Boot 菜单 TFTP 引导 / 网页刷机用
+          find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*philips*hy3000*recovery.itb' \
             -exec cp {} out/ \; 2>/dev/null || true
 
-          if ! ls out/ 2>/dev/null | grep -qE "philips.*hy3000.*squashfs-sysupgrade"; then
-            echo "::error::$DEVICE 没有找到 squashfs-sysupgrade 产物"
+          if ! ls out/ 2>/dev/null | grep -qE "philips.*hy3000.*sysupgrade.itb"; then
+            echo "::error::$DEVICE 没有找到 sysupgrade.itb 产物"
             ls -la out/ bin/targets/mediatek/filogic/ 2>/dev/null || true
             exit 1
           fi
+          for a in gpt.bin preloader.bin bl31-uboot.fip; do
+            ls out/ | grep -q "philips.*hy3000.*$a" || { echo "::error::缺少引导工件 $a"; exit 1; }
+          done
           echo "产物文件数: $(ls out | wc -l)"
           {
             echo "## 🏗️ iStoreOS 25.12 · Philips HY3000 编译完成"
@@ -287,9 +292,17 @@ jobs:
           - 提交: ${{ github.sha }}
           - 日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-          WiFi：mt76（kmod-mt7915e）+ wpad，2.4G/5G 双频，LuCI 网络→无线可用。
-          eMMC 设备：Release 提供 squashfs-sysupgrade.bin（从同款 eMMC 分区布局升级），
-          首次刷机请用 initramfs 镜像或参考 HY3000 的 uboot 刷机方式。
+          WiFi：mt76（kmod-mt7915e）+ wpad，2.4G/5G 双频（iStoreOS 默认关闭无线，
+          进 LuCI 网络→无线手动启用即可）。注意 iStoreOS 默认账户 root / 密码空。
+
+          本固件为 FIT(itb) 镜像，配套社区 bl-mt798x U-Boot（eMMC GPT 布局）：
+          - preloader.bin  → BL2，写 eMMC boot0 硬件分区（mmc partconf 0 1 1 1）
+          - bl31-uboot.fip → 写用户区 0x3400 扇区（U-Boot FIP）
+          - gpt.bin        → 写用户区扇区 0（GPT 分区表）
+          - sysupgrade.itb → production 分区系统镜像（U-Boot 网页/菜单刷入）
+          - initramfs-recovery.itb → 临时救援/恢复镜像（U-Boot 菜单 TFTP 引导）
+          在已装社区 U-Boot 的机器上：U-Boot 网页刷 sysupgrade.itb 即可；
+          原厂/安卓系统需先按 rax3000m 流程刷入 bl2+fip+gpt 三引导工件。
           EOF
           gh release create "$TAG" rel/* \
             --title "iStoreOS HY3000 (25.12) · $TAG" \
