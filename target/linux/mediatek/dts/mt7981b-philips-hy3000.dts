@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR MIT
 /*
- * Philips HY3000 (MT7981B, eMMC)
- * 移植自 tvliving/immortalwrt-mt798x-action 的 hy3000（padavanonly openwrt-24.10-6.6）
- * 与原版差异：lede/istoreos 6.12+ 的 mt7981b.dtsi 中 wifi 节点默认 disabled，
- * 且 WiFi 走 mt76（kmod-mt7915e）而非 MTK mt_wifi——
- * 此处显式启用 &wifi 并接 eMMC factory 分区 eeprom(nvmem)，保证 LuCI 有无线
+ * Copyright (C) 2023 skygunner5 <fourking85611@yahoo.co.jp>
  */
 
 /dts-v1/;
@@ -15,24 +11,25 @@
 #include "mt7981b.dtsi"
 
 / {
-	model = "Philips HY3000";
+	model = "PHILIPS HY3000";
 	compatible = "philips,hy3000", "mediatek,mt7981";
 
 	aliases {
-		led-boot = &status_red_led;
-		led-failsafe = &status_red_led;
-		led-running = &status_green_led;
-		led-upgrade = &status_red_led;
+		led-boot = &red_led;
+		led-failsafe = &red_led;
+		led-running = &green_led;
+		led-upgrade = &green_led;
 		serial0 = &uart0;
 	};
 
-	chosen {
-		bootargs = "root=PARTLABEL=rootfs rootwait rootfstype=squashfs,f2fs";
+	chosen: chosen {
+		bootargs-override = "root=/dev/fit0 rootwait";
 		stdout-path = "serial0:115200n8";
+		rootdisk = <&emmc_rootdisk>;
 	};
 
 	memory@40000000 {
-		reg = <0 0x40000000 0 0x20000000>;
+		reg = <0 0x40000000 0 0x40000000>;
 		device_type = "memory";
 	};
 
@@ -49,29 +46,124 @@
 			label = "mesh";
 			linux,code = <BTN_9>;
 			linux,input-type = <EV_SW>;
-			gpios = <&pio 0 GPIO_ACTIVE_LOW>;
+			gpios = <&pio 0 GPIO_ACTIVE_HIGH>;
 		};
 	};
 
 	gpio-leds {
 		compatible = "gpio-leds";
 
-		status_red_led: led-0 {
-			label = "red:status";
-			gpios = <&pio 8 GPIO_ACTIVE_HIGH>;
+		green_led: led-0 {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
 		};
 
-		status_green_led: led-1 {
-			label = "green:status";
-			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+		red_led: led-1 {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_RED>;
+			gpios = <&pio 8 GPIO_ACTIVE_HIGH>;
 		};
 	};
 };
 
+&eth {
+	status = "okay";
+
+	gmac0: mac@0 {
+		compatible = "mediatek,eth-mac";
+		reg = <0>;
+		phy-mode = "2500base-x";
+
+		nvmem-cells = <&macaddr_factory_74 0>;
+		nvmem-cell-names = "mac-address";
+
+		fixed-link {
+			speed = <2500>;
+			full-duplex;
+			pause;
+		};
+	};
+};
+
+&mdio_bus {
+	switch: switch@1f {
+		compatible = "mediatek,mt7531";
+		reg = <31>;
+		reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		interrupt-parent = <&pio>;
+		interrupts = <38 IRQ_TYPE_LEVEL_HIGH>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				label = "wan";
+			};
+
+			port@1 {
+				reg = <1>;
+				label = "lan1";
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan2";
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan3";
+			};
+
+			port@6 {
+				reg = <6>;
+				label = "cpu";
+				ethernet = <&gmac0>;
+				phy-mode = "2500base-x";
+
+				fixed-link {
+					speed = <2500>;
+					full-duplex;
+					pause;
+				};
+			};
+		};
+	};
+};
+
+&wifi {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	nvmem-cells = <&eeprom_factory_0>;
+	nvmem-cell-names = "eeprom";
+	status = "okay";
+
+	band@0 {
+		reg = <0>;
+		nvmem-cells = <&macaddr_factory_74 2>;
+		nvmem-cell-names = "mac-address";
+	};
+
+	band@1 {
+		reg = <1>;
+		nvmem-cells = <&macaddr_factory_74 3>;
+		nvmem-cell-names = "mac-address";
+	};
+};
+
 &mmc0 {
+	#address-cells = <1>;
+	#size-cells = <0>;
 	bus-width = <8>;
-	cap-mmc-highspeed;
 	max-frequency = <52000000>;
+	no-sd;
+	no-sdio;
+	cap-mmc-highspeed;
 	non-removable;
 	pinctrl-names = "default", "state_uhs";
 	pinctrl-0 = <&mmc0_pins_default>;
@@ -106,82 +198,10 @@
 						};
 					};
 				};
-			};
-		};
-	};
-};
 
-&eth {
-	status = "okay";
-
-	gmac0: mac@0 {
-		compatible = "mediatek,eth-mac";
-		reg = <0>;
-		phy-mode = "2500base-x";
-
-		nvmem-cells = <&macaddr_factory_74 0>;
-		nvmem-cell-names = "mac-address";
-		fixed-link {
-			speed = <2500>;
-			full-duplex;
-			pause;
-		};
-	};
-
-	gmac1: mac@1 {
-		compatible = "mediatek,eth-mac";
-		reg = <1>;
-		phy-mode = "gmii";
-		phy-handle = <&int_gbe_phy>;
-	};
-};
-
-&mdio_bus {
-	switch: switch@1f {
-		compatible = "mediatek,mt7531";
-		reg = <31>;
-		reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
-		interrupt-controller;
-		#interrupt-cells = <1>;
-		interrupt-parent = <&pio>;
-		interrupts = <38 IRQ_TYPE_LEVEL_HIGH>;
-	};
-};
-
-&switch {
-	ports {
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		port@0 {
-			reg = <0>;
-			label = "wan";
-		};
-
-		port@1 {
-			reg = <1>;
-			label = "lan1";
-		};
-
-		port@2 {
-			reg = <2>;
-			label = "lan2";
-		};
-
-		port@3 {
-			reg = <3>;
-			label = "lan3";
-		};
-
-		port@6 {
-			reg = <6>;
-			ethernet = <&gmac0>;
-			phy-mode = "2500base-x";
-
-			fixed-link {
-				speed = <2500>;
-				full-duplex;
-				pause;
+				emmc_rootdisk: block-partition-production {
+					partname = "production";
+				};
 			};
 		};
 	};
@@ -213,12 +233,6 @@
 
 &watchdog {
 	status = "okay";
-};
-
-&wifi {
-	status = "okay";
-	nvmem-cells = <&eeprom_factory_0>;
-	nvmem-cell-names = "eeprom";
 };
 
 &xhci {
