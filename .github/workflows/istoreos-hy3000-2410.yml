@@ -842,13 +842,52 @@ jobs:
 
       - name: 安装编译依赖
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev \
-            libelf-dev python3-dev python3-setuptools rsync unzip zlib1g-dev \
-            file wget ccache zstd swig time xsltproc subversion bc patch bzip2 \
-            libtool-bin pkg-config autoconf automake
-          sudo apt-get install -y -qq perl libthread-queue-any-perl 2>/dev/null || true
+          set +e
+          # runner 自带的是 azure 内网镜像，偶发 DNS 解析失败会直接让 apt 装不上东西，
+          # 这里做三层兜底：带重试的 update -> 换官方源再 update -> 装完按工具名逐个验收。
+          PKGS="build-essential clang flex bison g++ gawk gcc-multilib g++-multilib
+          gettext git libncurses-dev libssl-dev libelf-dev python3-dev python3-setuptools
+          rsync unzip zlib1g-dev file wget ccache zstd swig time xsltproc subversion bc
+          patch bzip2 libtool-bin pkg-config autoconf automake"
+          PKGS=$(echo $PKGS)
+
+          apt_update() {
+            sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 \
+                         -o Acquire::https::Timeout=30 update -qq
+          }
+
+          apt_update
+          if [ $? -ne 0 ]; then
+            echo "::warning::默认镜像源 update 失败，切到 archive.ubuntu.com 重试"
+            printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: noble noble-updates noble-backports noble-security\nComponents: main universe restricted multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' \
+              | sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null
+            sudo rm -rf /var/lib/apt/lists/*
+            apt_update || echo "::warning::官方源 update 仍然失败，尝试用 runner 预装工具继续"
+          fi
+
+          ok=0
+          for i in 1 2 3; do
+            if sudo apt-get install -y -qq $PKGS; then ok=1; break; fi
+            echo "::warning::apt install 第 $i 次失败，10 秒后重试"
+            sleep 10
+            apt_update
+          done
+          sudo apt-get install -y -qq perl libthread-queue-any-perl >/dev/null 2>&1
+
+          # 按工具名验收：runner 镜像本身已预装大部分依赖，缺哪个才是真问题
+          miss=
+          for t in gcc g++ make clang flex bison gawk gettext rsync unzip zstd \
+                   xsltproc svn bc patch bzip2 pkg-config autoconf automake swig ccache; do
+            command -v "$t" >/dev/null 2>&1 || miss="$miss $t"
+          done
+          [ -f /usr/include/openssl/ssl.h ] || miss="$miss libssl-dev"
+          [ -f /usr/include/libelf.h ] || miss="$miss libelf-dev"
+          [ -f /usr/include/ncurses.h ] || miss="$miss libncurses-dev"
+          if [ -n "$miss" ]; then
+            echo "::error::缺少编译依赖：$miss（apt install 结果 ok=$ok，多半是网络/DNS 抖动，重跑即可）"
+            exit 1
+          fi
+          echo "✔ 编译依赖齐备（apt install ok=$ok）"
 
       - name: 恢复 ccache
         uses: actions/cache@v4
