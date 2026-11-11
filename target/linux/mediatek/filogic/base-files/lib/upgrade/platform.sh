@@ -121,6 +121,7 @@ platform_do_upgrade() {
 	bananapi,bpi-r4-lite|\
 	bazis,ax3000wm|\
 	cmcc,a10-ubootmod|\
+	philips,hy3000|\
 	cmcc,rax3000m|\
 	comfast,cf-wr632ax-ubootmod|\
 	creatlentem,clt-r30b1-ubi|\
@@ -180,7 +181,6 @@ platform_do_upgrade() {
 	glinet,gl-x3000|\
 	glinet,gl-xe3000|\
 	hiveton,h5000m|\
-	philips,hy3000|\
 	huasifei,wh3000|\
 	huasifei,wh3000-pro-emmc|\
 	smartrg,sdg-8612|\
@@ -364,6 +364,7 @@ platform_check_image() {
 	bananapi,bpi-r4-lite|\
 	bazis,ax3000wm|\
 	cmcc,a10-ubootmod|\
+	philips,hy3000|\
 	cmcc,rax3000m|\
 	comfast,cf-wr632ax-ubootmod|\
 	creatlentem,clt-r30b1-ubi|\
@@ -437,6 +438,7 @@ platform_copy_config() {
 	bananapi,bpi-r4-2g5|\
 	bananapi,bpi-r4-poe|\
 	bananapi,bpi-r4-lite|\
+	philips,hy3000|\
 	cmcc,rax3000m|\
 	gatonetworks,gdsp|\
 	mediatek,mt7988a-rfb)
@@ -456,7 +458,6 @@ platform_copy_config() {
 	glinet,gl-xe3000|\
 	globitel,bt-r320|\
 	hiveton,h5000m|\
-	philips,hy3000|\
 	huasifei,wh3000|\
 	huasifei,wh3000-pro-emmc|\
 	jdcloud,re-cp-03|\
