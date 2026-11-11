@@ -616,14 +616,14 @@ jobs:
           		button-reset {
           			label = "reset";
           			linux,code = <KEY_RESTART>;
-          			gpios = <&pio 1 GPIO_ACTIVE_LOW>;
+          			gpios = <&gpio 1 GPIO_ACTIVE_LOW>;
           		};
 
           		button-mesh {
           			label = "mesh";
           			linux,code = <BTN_9>;
           			linux,input-type = <EV_SW>;
-          			gpios = <&pio 0 GPIO_ACTIVE_HIGH>;
+          			gpios = <&gpio 0 GPIO_ACTIVE_HIGH>;
           		};
           	};
 
@@ -632,12 +632,12 @@ jobs:
 
           		led-0 {
           			label = "green:status";
-          			gpios = <&pio 13 GPIO_ACTIVE_LOW>;
+          			gpios = <&gpio 13 GPIO_ACTIVE_LOW>;
           		};
 
           		led-1 {
           			label = "red:status";
-          			gpios = <&pio 8 GPIO_ACTIVE_HIGH>;
+          			gpios = <&gpio 8 GPIO_ACTIVE_HIGH>;
           		};
           	};
           };
@@ -646,8 +646,8 @@ jobs:
           	status = "okay";
           	mediatek,gmac-id = <0>;
           	phy-mode = "2500base-x";
-          	mediatek,switch = "auto";
-          	reset-gpios = <&pio 39 GPIO_ACTIVE_HIGH>;
+          	mediatek,switch = "mt7531";
+          	reset-gpios = <&gpio 39 GPIO_ACTIVE_HIGH>;
 
           	fixed-link {
           		speed = <2500>;
@@ -666,7 +666,7 @@ jobs:
           	status = "okay";
           };
 
-          &pio {
+          &pinctrl {
           	mmc0_pins_default: mmc0default {
           		mux {
           			function = "flash";
@@ -718,6 +718,10 @@ jobs:
           bootfile_gpt=openwrt-mediatek-filogic-philips_hy3000-gpt.bin
           bootled_pwr=red:status
           bootled_rec=green:status
+          _init_env=setenv _init_env ; saveenv ; saveenv
+          _firstboot=setenv _firstboot ; run _switch_to_menu ; run _init_env ; run boot_first
+          _switch_to_menu=setenv _switch_to_menu ; setenv bootdelay 3 ; setenv bootmenu_delay 3 ; setenv bootmenu_0 $bootmenu_0d ; setenv bootmenu_0d ; run _bootmenu_update_title
+          _bootmenu_update_title=setenv _bootmenu_update_title ; setenv bootmenu_title "$bootmenu_title       $ver"
           bootmenu_confirm_return=askenv - Press ENTER to return to menu ; bootmenu 60
           bootmenu_default=0
           bootmenu_delay=0
@@ -804,6 +808,18 @@ jobs:
           grep -n "philips" package/boot/uboot-envtools/files/mediatek_filogic
           grep -n "mt7981_philips_hy3000" package/boot/uboot-mediatek/Makefile | head -3
           ls -la package/boot/uboot-mediatek/patches/ | tail -3
+
+          # u-boot 2024.10 的 mt7981.dtsi 只有 &pinctrl / &gpio 两个标签（没有 &pio），
+          # 用错标签 dtc 会报 "Label or path pio not found" 导致变体编译失败。
+          P=package/boot/uboot-mediatek/patches/475-add-philips_hy3000.patch
+          if grep -n '&pio[ <]' "$P"; then
+            echo "::error::U-Boot dts 使用了 &pio，24.10 的 u-boot 只认 &pinctrl / &gpio"
+            exit 1
+          fi
+          for lab in gpio pinctrl mmc0 eth uart0 watchdog; do
+            grep -q "&$lab" "$P" || { echo "::error::U-Boot dts 缺少 &$lab 节点"; exit 1; }
+          done
+          echo "✔ U-Boot dts 标签校验通过（&gpio / &pinctrl / &mmc0 / &eth / &uart0 / &watchdog）"
       - name: 释放磁盘空间
         run: |
           echo "===== 释放前 ====="
@@ -1036,12 +1052,30 @@ jobs:
           make download -j8 || echo "::warning::make download 有失败项，构建时会重试"
           find dl -size -1024c -exec rm -f {} \;
 
+      - name: 单编 U-Boot（提前暴露 uboot 变体问题）
+        run: |
+          set +e
+          make -j"$(nproc)" package/boot/uboot-mediatek/compile V=s > uboot.log 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::uboot-mediatek 单编失败（真实错误见 uboot.log）"
+            echo "===== uboot.log 中的错误行 ====="
+            grep -nE "Error [0-9]|\*\*\*|error:|No rule to make|undefined|not found|Label or path" uboot.log | tail -60 || true
+            echo "===== uboot.log 尾部 200 行 ====="
+            tail -n 200 uboot.log || true
+            exit 1
+          fi
+          grep -cE "^" uboot.log >/dev/null 2>&1 || true
+          echo "✔ uboot-mediatek 单编通过（mt7981_philips_hy3000）"
+
       - name: 编译
         run: |
+          set +e
           set -o pipefail
           nproc
           make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log
-          rc=${PIPESTATUS[0]}
+          rc=$?
           if [ "$rc" -ne 0 ]; then
             echo "::warning::并行编译失败（静默模式下失败包的报错被吞），用 -j1 V=s 重跑失败包捕获真实错误"
             FAILED=$(grep -oE "ERROR: \S+ failed to build( \(build variant: \S+\))?" build.log | awk '{print $2}' | sort -u || true)
@@ -1063,11 +1097,12 @@ jobs:
             tail -n 150 error.log 2>/dev/null || true
             exit 1
           fi
+          exit 0
 
       - name: 失败诊断
         if: failure()
         run: |
-          for f in prepare.log defconfig.log feeds-update.log feeds-install.log build.log error.log; do
+          for f in prepare.log defconfig.log feeds-update.log feeds-install.log uboot.log build.log error.log; do
             if [ -f "$f" ]; then
               echo "===== $f （尾部 40 行） ====="
               tail -40 "$f" || true

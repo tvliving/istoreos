@@ -388,6 +388,7 @@ jobs:
 
       - name: 编译
         run: |
+          set +e
           set -o pipefail
           nproc
           make -j"$(( $(nproc) + 1 ))" 2>&1 | tee build.log
