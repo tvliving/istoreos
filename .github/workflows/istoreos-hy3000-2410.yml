@@ -432,9 +432,9 @@ jobs:
           if "philips,hy3000" in s:
               print("envtools 已含 hy3000，跳过")
           else:
-              a = "\tcmcc,rax3000m|\\\n\tjdcloud,re-cp-03)"
+              a = "cmcc,rax3000m|\\\njdcloud,re-cp-03)"
               assert s.count(a) == 1, "envtools 锚点: %d" % s.count(a)
-              s = s.replace(a, "\tcmcc,rax3000m|\\\n\tphilips,hy3000|\\\n\tjdcloud,re-cp-03)", 1)
+              s = s.replace(a, "cmcc,rax3000m|\\\nphilips,hy3000|\\\njdcloud,re-cp-03)", 1)
               io.open(p, "w", encoding="utf-8", newline="\n").write(s)
               print("已注入 uboot-envtools")
           PY
