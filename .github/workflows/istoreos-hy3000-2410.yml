@@ -367,8 +367,10 @@ jobs:
           '''
           p = "target/linux/mediatek/image/filogic.mk"
           s = io.open(p, encoding="utf-8").read()
-          if "Device/philips_hy3000" in s:/n    s = re.sub(r"define Device/philips_hy3000.*?TARGET_DEVICES \+= philips_hy3000\n", block, s, flags=re.S)
-          else:/n    anchor = "TARGET_DEVICES += openembed_som7981\n"
+          if "Device/philips_hy3000" in s:
+              s = re.sub(r"define Device/philips_hy3000.*?TARGET_DEVICES \+= philips_hy3000\n", block, s, flags=re.S)
+          else:
+              anchor = "TARGET_DEVICES += openembed_som7981\n"
               assert anchor in s, "filogic.mk 里找不到插入锚点"
               s = s.replace(anchor, anchor + "\n" + block, 1)
           io.open(p,"w",encoding="utf-8",newline="\n").write(s)
@@ -381,8 +383,10 @@ jobs:
           import io
           p = "target/linux/mediatek/filogic/base-files/etc/board.d/02_network"
           s = io.open(p, encoding="utf-8").read()
-          if "philips,hy3000" in s:/n    print("02_network 已含 hy3000，跳过")
-          else:/n    a1 = "\tqihoo,360t7|\\\n\trouterich,ax3000|\\\n"
+          if "philips,hy3000" in s:
+              print("02_network 已含 hy3000，跳过")
+          else:
+              a1 = "\tqihoo,360t7|\\\n\trouterich,ax3000|\\\n"
               assert s.count(a1) == 1, "02_network 接口锚点不唯一: %d" % s.count(a1)
               s = s.replace(a1, "\tphilips,hy3000|\\\n" + a1, 1)
               a2 = "\tqihoo,360t7)\n\t\tlan_mac=$(mtd_get_mac_ascii factory lanMac)"
@@ -403,8 +407,10 @@ jobs:
           import io
           p = "target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh"
           s = io.open(p, encoding="utf-8").read()
-          if "philips,hy3000" in s:/n    print("platform.sh 已含 hy3000，跳过")
-          else:/n    fit = "\tcmcc,rax3000m|\\\n\tcudy,tr3000-v1-ubootmod|\\\n"
+          if "philips,hy3000" in s:
+              print("platform.sh 已含 hy3000，跳过")
+          else:
+              fit = "\tcmcc,rax3000m|\\\n\tcudy,tr3000-v1-ubootmod|\\\n"
               assert s.count(fit) == 1, "fit 分组锚点: %d" % s.count(fit)
               s = s.replace(fit, "\tphilips,hy3000|\\\n" + fit, 1)
               chk = "\tcmcc,rax3000m)\n\t\t[ \"$magic\" != \"d00dfeed\" ]"
@@ -423,8 +429,10 @@ jobs:
           import io
           p = "package/boot/uboot-envtools/files/mediatek_filogic"
           s = io.open(p, encoding="utf-8").read()
-          if "philips,hy3000" in s:/n    print("envtools 已含 hy3000，跳过")
-          else:/n    a = "\tcmcc,rax3000m|\\\n\tjdcloud,re-cp-03)"
+          if "philips,hy3000" in s:
+              print("envtools 已含 hy3000，跳过")
+          else:
+              a = "\tcmcc,rax3000m|\\\n\tjdcloud,re-cp-03)"
               assert s.count(a) == 1, "envtools 锚点: %d" % s.count(a)
               s = s.replace(a, "\tcmcc,rax3000m|\\\n\tphilips,hy3000|\\\n\tjdcloud,re-cp-03)", 1)
               io.open(p, "w", encoding="utf-8", newline="\n").write(s)
@@ -763,8 +771,10 @@ jobs:
           import re
           p = "package/boot/uboot-mediatek/Makefile"
           s = io.open(p, encoding="utf-8").read()
-          if "mt7981_philips_hy3000" in s:/n    print("Makefile 已含目标，跳过")
-          else:/n    anchor = "define U-Boot/mt7981_cmcc_rax3000m-emmc\n"
+          if "mt7981_philips_hy3000" in s:
+              print("Makefile 已含目标，跳过")
+          else:
+              anchor = "define U-Boot/mt7981_cmcc_rax3000m-emmc\n"
               assert s.count(anchor) == 1, "Makefile define 锚点: %d" % s.count(anchor)
               newdef = ("define U-Boot/mt7981_philips_hy3000\n"
                         "  NAME:=PHILIPS HY3000\n"
