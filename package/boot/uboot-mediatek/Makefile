@@ -267,6 +267,18 @@ define U-Boot/mt7981_cmcc_rax3000m-emmc-ddr3
   DEPENDS:=+trusted-firmware-a-mt7981-emmc-ddr3-1866
 endef
 
+define U-Boot/mt7981_philips_hy3000
+  NAME:=PHILIPS HY3000
+  BUILD_SUBTARGET:=filogic
+  BUILD_DEVICES:=philips_hy3000
+  UBOOT_CONFIG:=mt7981_philips_hy3000
+  UBOOT_IMAGE:=u-boot.fip
+  BL2_BOOTDEV:=emmc
+  BL2_SOC:=mt7981
+  BL2_DDRTYPE:=ddr4
+  DEPENDS:=+trusted-firmware-a-mt7981-emmc-ddr4
+endef
+
 define U-Boot/mt7981_cmcc_rax3000m-emmc-ddr4
   NAME:=CMCC RAX3000M
   BUILD_SUBTARGET:=filogic
@@ -1302,6 +1314,7 @@ UBOOT_TARGETS := \
 	mt7981_cmcc_a10 \
 	mt7981_cmcc_rax3000m-emmc-ddr3 \
 	mt7981_cmcc_rax3000m-emmc-ddr4 \
+mt7981_philips_hy3000 \
 	mt7981_cmcc_rax3000m-nand-ddr3 \
 	mt7981_cmcc_rax3000m-nand-ddr4 \
 	mt7981_comfast_cf-wr632ax \
