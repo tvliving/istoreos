@@ -335,7 +335,10 @@ jobs:
           PY
 
 
-          # 2) filogic.mk：sysupgrade.itb（FIT external rootfs）+ gpt/preloader/bl31-uboot 三工件
+          # 2) filogic.mk：sysupgrade.itb（FIT external rootfs）+ gpt 工件
+          # preloader/bl31-uboot 不再由本树编译，改用 Yuzhii0718/bl-mt798x-dhcpd
+          # 的预编译产物（eMMC/DDR4，编译后单独下载），彻底绕开 24.10 上
+          # ATF/U-Boot 单编的 dtc、toolchain 连环问题
           python3 - <<'PY'
           import io, re
           block = r'''
@@ -358,10 +361,8 @@ jobs:
             IMAGE/sysupgrade.itb := append-kernel | \
           	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
           	pad-rootfs | append-metadata
-            ARTIFACTS := gpt.bin preloader.bin bl31-uboot.fip
+            ARTIFACTS := gpt.bin
             ARTIFACT/gpt.bin := mt798x-gpt emmc
-            ARTIFACT/preloader.bin := mt7981-bl2 emmc-ddr4
-            ARTIFACT/bl31-uboot.fip := mt7981-bl31-uboot philips_hy3000
           endef
           TARGET_DEVICES += philips_hy3000
           '''
@@ -374,7 +375,7 @@ jobs:
               assert anchor in s, "filogic.mk 里找不到插入锚点"
               s = s.replace(anchor, anchor + "\n" + block, 1)
           io.open(p,"w",encoding="utf-8",newline="\n").write(s)
-          print("已注入 filogic.mk 设备块（itb + 三工件）")
+          print("已注入 filogic.mk 设备块（itb + gpt 工件，引导工件走预编译）")
           PY
 
 
@@ -1108,39 +1109,6 @@ jobs:
           make download -j8 || echo "::warning::make download 有失败项，构建时会重试"
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: 单编 U-Boot（提前暴露 uboot 变体问题）
-        run: |
-          set +e
-          # 裸树上单编 package 前必须先备好交叉工具链，否则 package/libs/toolchain
-          # 拷贝 ld-musl-*.so* 时源文件不存在而失败（run 43049969078 的教训）
-          if ! ls staging_dir/toolchain-*/lib/ld-musl-*.so* >/dev/null 2>&1; then
-            make -j"$(nproc)" toolchain/compile > toolchain.log 2>&1
-            rc=$?
-            if [ "$rc" -ne 0 ]; then
-              echo "::error::toolchain 编译失败（真实错误见 toolchain.log）"
-              tail -n 100 toolchain.log || true
-              exit 1
-            fi
-          fi
-          # 单编跑在内核之前，24.10 trusted-firmware-a.mk 的 DTC=$(wildcard
-          # $(LINUX_DIR)/scripts/dtc/dtc) 为空，ATF 落到 PATH 找 dtc 而没有
-          # （run 43131956656: dtc: not found；run 43136815993: 24.10 无 tools/dtc，
-          # make tools/dtc/install 也失败）→ 直接装系统 dtc 供 ATF 使用
-          command -v dtc >/dev/null 2>&1 || sudo apt-get install -y device-tree-compiler
-          make -j"$(nproc)" package/boot/uboot-mediatek/compile V=s > uboot.log 2>&1
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::error::uboot-mediatek 单编失败（真实错误见 uboot.log）"
-            echo "===== uboot.log 中的错误行 ====="
-            grep -nE "Error [0-9]|\*\*\*|error:|No rule to make|undefined|not found|Label or path" uboot.log | tail -60 || true
-            echo "===== uboot.log 尾部 200 行 ====="
-            tail -n 200 uboot.log || true
-            exit 1
-          fi
-          grep -cE "^" uboot.log >/dev/null 2>&1 || true
-          echo "✔ uboot-mediatek 单编通过（mt7981_philips_hy3000）"
-
       - name: 编译
         run: |
           set +e
@@ -1170,6 +1138,44 @@ jobs:
             exit 1
           fi
           exit 0
+
+      - name: 下载预编译 U-Boot（Yuzhii bl-mt798x-dhcpd，eMMC/DDR4）
+        run: |
+          python3 - <<'PY'
+          import json, sys, os, hashlib, urllib.request
+          API = 'https://api.github.com/repos/Yuzhii0718/bl-mt798x-dhcpd/releases?per_page=20'
+          def dl(url):
+              req = urllib.request.Request(url, headers={'User-Agent': 'istoreos-ci'})
+              return urllib.request.urlopen(req, timeout=180).read()
+          rels = json.loads(dl(API))
+          pick = None
+          for r in sorted(rels, key=lambda x: x['created_at'], reverse=True):
+              b = [a for a in r['assets'] if a['name'].startswith('bl2-mt7981_philips_hy3000_SP2_')]
+              f = [a for a in r['assets'] if a['name'].startswith('fip-mt7981_philips_hy3000_SP2-')]
+              if b and f:
+                  pick = (r['tag_name'], b[0], f[0]); break
+          if not pick:
+              sys.exit('Yuzhii 仓库没有 philips_hy3000 的 bl2/fip 资产')
+          tag, ba, fa = pick
+          print('release:', tag)
+          def md5_of(url):
+              name = url.rsplit('/', 1)[1]
+              seg = [s for s in name.split('_') if s.startswith('md5-')]
+              return seg[0][4:]
+          blob = dl(ba['browser_download_url'])
+          assert hashlib.md5(blob).hexdigest() == md5_of(ba['browser_download_url']), 'bl2 md5 不匹配'
+          print('bl2 md5 ✔')
+          blob2 = dl(fa['browser_download_url'])
+          assert hashlib.md5(blob2).hexdigest() == md5_of(fa['browser_download_url']), 'fip md5 不匹配'
+          print('fip md5 ✔')
+          d = 'bin/targets/mediatek/filogic'
+          os.makedirs(d, exist_ok=True)
+          open(d + '/openwrt-mediatek-filogic-philips_hy3000-preloader.bin', 'wb').write(blob)
+          open(d + '/openwrt-mediatek-filogic-philips_hy3000-bl31-uboot.fip', 'wb').write(blob2)
+          for x in sorted(os.listdir(d)):
+              if 'philips' in x:
+                  print(' ', x, os.path.getsize(d + '/' + x))
+          PY
 
       - name: 失败诊断
         if: failure()
