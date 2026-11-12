@@ -1122,17 +1122,11 @@ jobs:
               exit 1
             fi
           fi
-          # 单编绕过了 tools/install，而 arm-trusted-firmware-mediatek 编 mt7981.dtb
-          # 需要主机的 dtc 命令（run 43131956656：/bin/sh: 1: dtc: not found, Error 127）
-          if ! ls staging_dir/host/bin/dtc >/dev/null 2>&1; then
-            make -j"$(nproc)" tools/dtc/install > dtc.log 2>&1
-            rc=$?
-            if [ "$rc" -ne 0 ]; then
-              echo "::error::tools/dtc 编译失败（真实错误见 dtc.log）"
-              tail -n 100 dtc.log || true
-              exit 1
-            fi
-          fi
+          # 单编跑在内核之前，24.10 trusted-firmware-a.mk 的 DTC=$(wildcard
+          # $(LINUX_DIR)/scripts/dtc/dtc) 为空，ATF 落到 PATH 找 dtc 而没有
+          # （run 43131956656: dtc: not found；run 43136815993: 24.10 无 tools/dtc，
+          # make tools/dtc/install 也失败）→ 直接装系统 dtc 供 ATF 使用
+          command -v dtc >/dev/null 2>&1 || sudo apt-get install -y device-tree-compiler
           make -j"$(nproc)" package/boot/uboot-mediatek/compile V=s > uboot.log 2>&1
           rc=$?
           set -e
