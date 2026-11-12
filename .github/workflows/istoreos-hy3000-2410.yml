@@ -1111,6 +1111,17 @@ jobs:
       - name: 单编 U-Boot（提前暴露 uboot 变体问题）
         run: |
           set +e
+          # 裸树上单编 package 前必须先备好交叉工具链，否则 package/libs/toolchain
+          # 拷贝 ld-musl-*.so* 时源文件不存在而失败（run 43049969078 的教训）
+          if ! ls staging_dir/toolchain-*/lib/ld-musl-*.so* >/dev/null 2>&1; then
+            make -j"$(nproc)" toolchain/compile > toolchain.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::toolchain 编译失败（真实错误见 toolchain.log）"
+              tail -n 100 toolchain.log || true
+              exit 1
+            fi
+          fi
           make -j"$(nproc)" package/boot/uboot-mediatek/compile V=s > uboot.log 2>&1
           rc=$?
           set -e
