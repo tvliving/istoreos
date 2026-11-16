@@ -121,7 +121,6 @@ platform_do_upgrade() {
 	bananapi,bpi-r4-lite|\
 	bazis,ax3000wm|\
 	cmcc,a10-ubootmod|\
-	philips,hy3000|\
 	cmcc,rax3000m|\
 	comfast,cf-wr632ax-ubootmod|\
 	creatlentem,clt-r30b1-ubi|\
@@ -170,6 +169,7 @@ platform_do_upgrade() {
 	zyxel,wx5600-t0-ubootmod)
 		fit_do_upgrade "$1"
 		;;
+	philips,hy3000|\
 	acer,predator-w6|\
 	acer,predator-w6d|\
 	acer,vero-w6m|\
@@ -364,7 +364,6 @@ platform_check_image() {
 	bananapi,bpi-r4-lite|\
 	bazis,ax3000wm|\
 	cmcc,a10-ubootmod|\
-	philips,hy3000|\
 	cmcc,rax3000m|\
 	comfast,cf-wr632ax-ubootmod|\
 	creatlentem,clt-r30b1-ubi|\
@@ -407,6 +406,7 @@ platform_check_image() {
 		fit_check_image "$1"
 		return $?
 		;;
+	philips,hy3000|\
 	creatlentem,clt-r30b1|\
 	creatlentem,clt-r30b1-112m|\
 	hiveton,h5000m|\
@@ -438,7 +438,6 @@ platform_copy_config() {
 	bananapi,bpi-r4-2g5|\
 	bananapi,bpi-r4-poe|\
 	bananapi,bpi-r4-lite|\
-	philips,hy3000|\
 	cmcc,rax3000m|\
 	gatonetworks,gdsp|\
 	mediatek,mt7988a-rfb)
@@ -446,6 +445,7 @@ platform_copy_config() {
 			emmc_copy_config
 		fi
 		;;
+	philips,hy3000|\
 	acer,predator-w6|\
 	acer,predator-w6d|\
 	acer,vero-w6m|\
