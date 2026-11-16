@@ -429,9 +429,12 @@ jobs:
           grep -n "philips" target/linux/mediatek/image/filogic.mk | head -3
           grep -n "philips" target/linux/mediatek/filogic/base-files/etc/board.d/02_network
           grep -n "philips" target/linux/mediatek/filogic/base-files/lib/upgrade/platform.sh | head -5
-          # 安全护栏：本方案不应产出任何引导工件（BL2/FIP/GPT），否则容易被误刷成砖
-          if grep -nE "ARTIFACTS|mt798x-gpt|preloader|bl31-uboot" target/linux/mediatek/image/filogic.mk; then
-            echo "::error::filogic.mk 里出现了引导工件定义（会产出 BL2/FIP/GPT），必须移除"
+          # 安全护栏：本机型不应产出任何引导工件（BL2/FIP/GPT），否则容易被误刷成砖。
+          # 只看 hy3000 自己的设备块（别的机型有 ARTIFACTS 是正常的）。
+          if awk '/^define Device\/philips_hy3000$/,/^TARGET_DEVICES \+= philips_hy3000$/' \
+               target/linux/mediatek/image/filogic.mk \
+             | grep -nE "ARTIFACTS|mt798x-gpt|preloader|bl31-uboot"; then
+            echo "::error::hy3000 设备块里出现引导工件定义（会产出 BL2/FIP/GPT），必须移除"
             exit 1
           fi
           echo "OK  filogic.mk 无引导工件定义（不产出 preloader/fip/gpt）"
